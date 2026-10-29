@@ -5,9 +5,12 @@
 # no third copy of 6 GB through USB), and the game code from android/build_gamelib.sh (android/out).
 set -euo pipefail
 export MSYS_NO_PATHCONV=1  # (Git Bash: leave the device paths alone)
+# (or the packages: android/push_game.sh --nsp base.nsp [--update update.nsp] --keys prod.keys [--title-keys ...] /
+# --xci game.xci ...: imported first by android/nximport_dump.sh, docs/IMPORT-NSP-XCI.md)
+if [ "${1:-}" != "${1#--}" ]; then SRC=$("$(dirname "$0")/nximport_dump.sh" "$@"); fi
 cd "$(dirname "$0")/.."
 R=$PWD
-SRC=${1:?usage: android/push_game.sh <folder with exefs/ and romfs/>}
+SRC=${SRC:-${1:?usage: android/push_game.sh <folder with exefs/ and romfs/> | --nsp/--xci ... --keys prod.keys}}
 # (GAME_DEST / GAMELIB_OUT: another game version in its own data root, e.g. 1.6.0 in files/v160 - android/run_v160.sh)
 D=${GAME_DEST:-/sdcard/Android/data/com.botwrecomp.android/files/extracted}
 LIB=${GAMELIB_OUT:-android/out}
