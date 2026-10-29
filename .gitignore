@@ -21,3 +21,12 @@ tools/venv/
 venv/
 __pycache__/
 .DS_Store
+# NSP/XCI import (tools/nximport): the player's own keys and packages are never committed
+*.keys
+*.nsp
+*.xci
+*.nsz
+*.xcz
+*.nca
+*.ncz
+*.tik
