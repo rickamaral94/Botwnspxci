@@ -356,3 +356,19 @@ Código:
   - **Modo desempenho:** LSFG 3.1P, com os shaders `p_*` que o extrator já instala.
   - **Os dois valem na hora:** o framegen é finalizado e iniciado de novo entre dois quadros.
 
+### Ritmo por tempos de apresentação (30/10, à noite)
+
+- **O problema:** a espera de um período entre I e B prendia a thread de render, que não traduzia o quadro seguinte
+  nesse tempo. Isso explica parte dos ~26–28 quadros reais por segundo, em vez de 30, e a irregularidade (p95 ~25 ms).
+- **O que mudou:** com o framegen, o device habilita `VK_GOOGLE_display_timing` quando a plataforma oferece (é o
+  swapchain do Android). A swapchain passa a FIFO, com uma imagem a mais.
+- **Como fica o ritmo:**
+  - I e B vão para a fila juntos, com tempos de apresentação um slot de 60 Hz um do outro, e a thread de render não
+    espera;
+  - a grade segue os quadros reais: um slot já passado, ou mais de dois períodos à frente, recomeça a grade a partir
+    de agora.
+- **Sem a extensão,** fica o caminho por espera de antes. O log diz qual vale, em
+  `[fg] presentation times (VK_GOOGLE_display_timing): yes/no`.
+- **Desligar a opção** faz a swapchain ser recriada em MAILBOX antes do quadro seguinte. Ligar de novo a recria em
+  FIFO.
+

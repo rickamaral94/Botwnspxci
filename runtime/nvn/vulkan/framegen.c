@@ -4,9 +4,12 @@
 // The game runs at 30 (hle/framepace.c framepace_target); each real frame B is drawn, as the window would get it, into
 // an input image, and the framegen makes I(A, B) between it and the one before (A). The window then shows
 //   ... A -> I(A, B) -> B ...
-// I as soon as it is made, B one output period P later (half the real frames' interval, measured): B shows P later
-// than without the frame generation. The menus and the overlay are drawn over each shown image, never interpolated;
-// the game's own HUD is in its image, and is (known limit).
+// Pacing: where the platform gives presentation times (VK_GOOGLE_display_timing, Android's swapchain), I and B are
+// queued together in FIFO with times one 60 Hz slot apart, and the render thread never waits; elsewhere I goes at
+// once and the render thread waits one output period P (half the real frames' interval) before B. Either way B shows
+// one slot later than without the frame generation.
+// The menus and the overlay are drawn over each shown image, never interpolated; the game's own HUD is in its image,
+// and is (known limit).
 //   - The first real frame after a reset (out of the menus, a load, a new swapchain) shows alone.
 //   - An I whose B came too soon after the last shown image (the window would get two images inside half a period) is
 //     dropped, B shown at once: the queue of shown images never grows.
@@ -85,6 +88,7 @@ static VkExtent2D ctx_ext;
 static uint64_t fg_count;     // real frames given to the framegen (the one of number k is in fin[k % 2])
 static bool have_prev;        // fin[(fg_count - 1) % 2] holds the real frame before (a generated one can be shown)
 static uint64_t last_real_ns, last_shown_ns, base_ewma_ns;
+static uint64_t next_slot_ns;  // (with presentation times) the next free slot of the 60 Hz output grid
 static VkQueryPool ts_pool;   // (the framegen's GPU time: our timestamps either side of its work)
 static uint32_t ts_i;
 static bool ts_used[8];
@@ -182,7 +186,16 @@ static bool ready(VkExtent2D e) {
 
 // ------------------------------------------------------------------ the frame
 // (device.c vk_present_now) whether this presented frame goes through the frame generation
+// (device.c) FIFO presentation while the frame generation paces its images by their presentation times
+bool fg_wants_fifo(void) { return g_vk.display_timing && fg_dev && !fg_failed && g_settings.framegen; }
+
 bool fg_use_now(void) {
+    {   // (turned on or off: the swapchain made again in the other present mode before the next image)
+        static int last = -1;
+        int f = fg_wants_fifo();
+        if (last >= 0 && f != last) g_vk.sc_remake = true;
+        last = f;
+    }
     bool on = fg_dev && !fg_failed && g_settings.framegen;
     if (!on) {
         if (ctx_on) release();  // (turned off in play: at once)
@@ -278,15 +291,38 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
     }
     fg_count++;
     // I(A, B), then B a period later - or B alone
-    uint64_t period = base_ewma_ns ? base_ewma_ns / 2 : 16666667ull;
-    if (period < 6000000ull) period = 6000000ull;
-    if (period > 25000000ull) period = 25000000ull;
-    bool gen = have_prev && now - last_shown_ns >= period / 2;
-    if (have_prev && !gen) st_drop++;
-    if (gen) {
-        if (ts_pool) ts_write(vk_cmd(), tq + 1), ts_used[ts_i] = true;
-        if (show(fout.view)) st_gen++;
-        plat_sleep_until_ns(last_shown_ns + period);
+    uint64_t period;
+    if (g_vk.display_timing) {
+        // With presentation times (FIFO): I at the next slot of a 60 Hz grid, B at the one after, both queued at once -
+        // the compositor holds each until its time, and the render thread goes straight on to the next frame. The grid
+        // follows the real frames: a slot already past, or more than two periods ahead (the queue would grow), starts
+        // it again from now.
+        enum { OUT_NS = 16666667 };
+        period = OUT_NS;
+        uint64_t t_i = now + 2000000ull;
+        if (next_slot_ns > t_i && next_slot_ns - t_i < 2ull * OUT_NS) t_i = next_slot_ns;
+        else if (next_slot_ns && next_slot_ns > t_i) st_drop++;  // (behind: the grid starts over, no image skipped)
+        if (have_prev) {
+            if (ts_pool) ts_write(vk_cmd(), tq + 1), ts_used[ts_i] = true;
+            g_vk.next_present_ns = t_i;
+            if (show(fout.view)) st_gen++;
+            g_vk.next_present_ns = t_i + OUT_NS;
+            next_slot_ns = t_i + 2ull * OUT_NS;
+        } else {
+            g_vk.next_present_ns = t_i;
+            next_slot_ns = t_i + OUT_NS;
+        }
+    } else {
+        period = base_ewma_ns ? base_ewma_ns / 2 : 16666667ull;
+        if (period < 6000000ull) period = 6000000ull;
+        if (period > 25000000ull) period = 25000000ull;
+        bool gen = have_prev && now - last_shown_ns >= period / 2;
+        if (have_prev && !gen) st_drop++;
+        if (gen) {
+            if (ts_pool) ts_write(vk_cmd(), tq + 1), ts_used[ts_i] = true;
+            if (show(fout.view)) st_gen++;
+            plat_sleep_until_ns(last_shown_ns + period);
+        }
     }
     ts_i = (ts_i + 1) % 8;
     show(fin[k].view);

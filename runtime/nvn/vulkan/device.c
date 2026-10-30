@@ -822,6 +822,19 @@ static void create_device(void) {
                 b->shaderStorageImageReadWithoutFormat = h->shaderStorageImageReadWithoutFormat;
                 b->shaderStorageImageExtendedFormats = VK_TRUE;
                 g_vk.framegen = true;
+                // (and the presentation times the frame generation paces its images with, where the platform has them -
+                // Android's swapchain: VK_GOOGLE_display_timing - instead of sleeping on the render thread)
+                uint32_t ne = 0;
+                vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
+                VkExtensionProperties *ep2 = calloc(ne ? ne : 1, sizeof *ep2);
+                if (ep2 && vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep2) == VK_SUCCESS)
+                    for (uint32_t i = 0; i < ne && n_ext < 32; i++)
+                        if (!strcmp(ep2[i].extensionName, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) && !getenv("LARECOMP_FG_NO_TIMING")) {
+                            ext[n_ext++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
+                            g_vk.display_timing = true;
+                        }
+                free(ep2);
+                LOG("[fg] presentation times (VK_GOOGLE_display_timing): %s\n", g_vk.display_timing ? "yes" : "no: images paced by waiting");
             }
             fg_device_made(!no, no);
         }
@@ -920,6 +933,10 @@ static VkPresentModeKHR present_mode(void) {
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
     // 60). No tearing. LARECOMP_VK_PRESENT=fifo|immediate|mailbox to choose.
     const char *e = getenv("LARECOMP_VK_PRESENT");
+    // (the frame generation with presentation times: FIFO, where queued images wait for their time instead of
+    // replacing each other - vulkan/framegen.c)
+    extern bool fg_wants_fifo(void);
+    if (!e && fg_wants_fifo()) e = "fifo";
     VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
                           : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
     uint32_t n = 0;
@@ -970,7 +987,8 @@ static void create_swapchain(void) {
 #endif
     for (uint32_t i = 0; i < nf; i++)
         if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; break; }
-    uint32_t count = caps.minImageCount + 1;
+    extern bool fg_wants_fifo(void);
+    uint32_t count = caps.minImageCount + 1 + (fg_wants_fifo() ? 1 : 0);  // (frame generation: two images queued per real frame)
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;  // (asked for: the driver may make more, up to VK_MAX_SWAP_IMAGES)
     if (count < caps.minImageCount) count = caps.minImageCount;
@@ -1100,7 +1118,10 @@ static bool window_ready(void) {
 #ifdef __ANDROID__
     if (!android_surface_ready()) return false;
 #endif
-    if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
+    if (!g_vk.swapchain || g_vk.sc_remake || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) {
+        g_vk.sc_remake = false;
+        recreate_swapchain();
+    }
     return g_vk.swapchain != VK_NULL_HANDLE;
 }
 
@@ -1216,6 +1237,11 @@ void vk_frame_end(const char *shot_path) {
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
+    static uint32_t present_id;
+    VkPresentTimeGOOGLE when = {.presentID = ++present_id, .desiredPresentTime = g_vk.next_present_ns};
+    VkPresentTimesInfoGOOGLE times = {.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &when};
+    if (g_vk.display_timing && g_vk.next_present_ns) pi.pNext = &times;  // (vulkan/framegen.c: this image's time)
+    g_vk.next_present_ns = 0;
 #ifdef __ANDROID__
     uint64_t trace_start = vk_timing_trace_on() ? SDL_GetTicksNS() : 0;
 #endif

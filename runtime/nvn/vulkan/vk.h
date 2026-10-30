@@ -50,6 +50,9 @@ typedef struct {
     bool dyn_render;              // VK_KHR_dynamic_rendering in use; without it, classic render passes (rpcompat.c)
     bool sync2;                   // synchronization2 in use; without it, Vulkan 1.0 barriers (device.c sync1_*)
     bool framegen;                // made with the frame generation's features (vulkan/framegen.c): Video > Frame generation
+    bool display_timing;          // VK_GOOGLE_display_timing enabled (only with framegen): images given a presentation time
+    uint64_t next_present_ns;     // (vk_frame_end) the next image's desired presentation time, CLOCK_MONOTONIC; 0: as soon as possible
+    bool sc_remake;               // the swapchain is made again before the next image (its present mode changed)
     bool eds;                     // extended dynamic state in use; without it, those states (and extended dynamic state
                                   // 2's) baked into pipelines (exec.c PipeKey.fx)
     bool eds2;                    // extended dynamic state 2 in use; without it, depth bias and primitive restart are
