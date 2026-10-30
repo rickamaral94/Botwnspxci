@@ -88,7 +88,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     private static native String nativeBuildDlcPackage(int fd, boolean xci, int prodKeysFd, int titleKeysFd);
     private static final int REQ_DLC_PKG = 0x4c4e;
     private static native String nativeLsfgImport(int fd);
-    private static final int REQ_LSFG = 0x4c53;
+    private static final int REQ_LSFG = 0x4c60;  // (clear of REQ_PKG + 0..3, 0x4c50-0x4c53)
     private static native void nativeDlcDone(int result, String detail);
     // Import from NSP/XCI (runtime/ui/launcher.mm, package_import.cpp; docs/IMPORT-NSP-XCI.md)
     private static native void nativePackagePicked(int slot, String name);
