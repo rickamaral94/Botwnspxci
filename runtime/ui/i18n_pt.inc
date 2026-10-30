@@ -657,3 +657,7 @@
  "O pacote está danificado"},
 {"Its contents differ from the SHA-256 its own metadata records. Copy it again from the original, or dump it again from the game card or the console.",
  "O conteúdo dele difere do SHA-256 que os próprios metadados registram. Copie de novo a partir do original, ou refaça o dump do cartucho ou do console."},
+{"Install from NSP/XCI",
+ "Instalar de NSP/XCI"},
+{"Or choose the DLC's own NSP or XCI (Install from NSP/XCI): it uses the keys chosen or remembered under Game Files > Import from NSP/XCI.",
+ "Ou escolha o NSP ou XCI da própria DLC (Instalar de NSP/XCI): ele usa as chaves escolhidas ou lembradas em Arquivos do jogo > Importar NSP/XCI."},

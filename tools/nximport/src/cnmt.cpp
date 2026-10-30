@@ -29,7 +29,7 @@ Cnmt parse_cnmt(const Reader &r) {
     uint64_t at = add(0x20, ext, w.c_str());
     check_range(at, uint64_t(count) * 0x38, b.size(), w.c_str());
     // extended header: an application's patch id / a patch's application id first
-    c.application_id = c.type == META_PATCH && ext >= 8 ? le64(&b[0x20]) : c.title_id;
+    c.application_id = (c.type == META_PATCH || c.type == META_ADDON) && ext >= 8 ? le64(&b[0x20]) : c.title_id;
     for (uint16_t i = 0; i < count; i++, at += 0x38) {
         // content info: hash (0x20), content id (0x10), size (5 bytes; byte 5 attributes on newer firmware), type,
         // id offset

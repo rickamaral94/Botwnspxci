@@ -18,7 +18,7 @@ namespace nx {
 
 class RomfsFeed {
 public:
-    RomfsFeed(const Importer &imp, const std::atomic<bool> *cancel);
+    RomfsFeed(const RomfsSource &imp, const std::atomic<bool> *cancel);
     ~RomfsFeed();  // joins the producer
 
     // romfs_build_entries' callback: ctx is the RomfsFeed
@@ -39,7 +39,7 @@ public:
 private:
     void produce(int index, int fd, int attempt);
 
-    const Importer &imp_;
+    const RomfsSource &imp_;
     const std::atomic<bool> *cancel_;
     std::thread producer_;
     std::unique_ptr<Error> error_;

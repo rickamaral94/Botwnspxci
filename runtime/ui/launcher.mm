@@ -498,6 +498,8 @@ done:
 // picked the same way (a Turnip .zip, copied to the drivers folder the activity loads from at start).
 #include <jni.h>
 #include "package_import.h"  // (android/botwrecompandroid/app/src/main/cpp: Import from NSP/XCI)
+#include "nximport.h"        // (tools/nximport: the DLC from its NSP/XCI)
+#include "romfs_feed.h"
 std::atomic<bool> g_android_imported{false};
 static std::string g_driver_msg;
 static bool g_driver_restart;  // (the message asks for a restart: a Restart now button beside it)
@@ -784,6 +786,73 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroi
     if (ok) return NULL;
     fprintf(stderr, "[launcher] DLC image: %s\n", why);
     return env->NewStringUTF(why[0] ? why : "Could not build the DLC's data image. Check free storage and try again.");
+}
+
+// The DLC from its own NSP/XCI (Settings > DLC > Install from NSP/XCI; BOTWRecompAndroidActivity importDlcPackage): the
+// pack with its data found through the package's metadata (nx::DlcImporter), its RomFS checked against its hash tree as
+// it's read, and dlc/aoc.bin built from it as from a picked folder - into aoc.bin.part first, renamed once whole, so a
+// DLC installed before stays until the new one is complete. The descriptors are owned from here on. Returns
+// "<nativeDlcDone result>|<detail>".
+extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeBuildDlcPackage(
+        JNIEnv *env, jclass, jint fd, jboolean xci, jint prod_fd, jint title_fd) {
+    int fds[3] = {fd, prod_fd, title_fd};
+    struct Guard {
+        int *f;
+        ~Guard() { for (int i = 0; i < 3; i++) if (f[i] >= 0) close(f[i]); }
+    } guard{fds};
+    auto take = [&](int i) { int x = fds[i]; fds[i] = -1; return x; };
+    bool pt = settings_host_portuguese();
+    auto said = [&](const nx::Error &e) { return pt ? e.pt() : e.en(); };
+    std::string dir = dlc_dir();
+    if (dir.empty()) return env->NewStringUTF("4|no data folder");
+    if (!nx::FdReader::seekable(fds[0], nullptr))
+        return env->NewStringUTF(pt ? "4|esse arquivo não pode ser lido onde está: copie-o para o armazenamento do aparelho"
+                                    : "4|that file can't be read in place: copy it to the device's storage");
+    std::unique_ptr<nx::DlcImporter> dlc;
+    try {
+        nx::ImportInput in;
+        in.base = std::make_shared<nx::FdReader>(take(0), true, xci ? "dlc.xci" : "dlc.nsp");
+        in.base_kind = xci ? nx::PackageKind::XCI : nx::PackageKind::NSP;
+        in.prod_keys = nx::MemReader::from_fd(take(1), 1u << 20, "prod.keys", true);
+        if (fds[2] >= 0) in.title_keys = nx::MemReader::from_fd(take(2), 16u << 20, "title.keys", true);
+        dlc.reset(new nx::DlcImporter(in));
+    } catch (const nx::DlcUnlockOnly &) {
+        return env->NewStringUTF("5|");
+    } catch (const nx::Error &e) {
+        fprintf(stderr, "[launcher] DLC package: %s\n", e.en().c_str());
+        return env->NewStringUTF(("4|" + said(e)).c_str());
+    }
+    for (auto &l : dlc->describe()) fprintf(stderr, "[import] %s\n", l.c_str());
+    const auto &files = dlc->romfs().files;
+    uint64_t need = 0x200 + (512ull << 20);  // (the image: its data, aligned, and its tables; the loose movies; a margin)
+    for (auto &f : files) need += ((f.size + 15) & ~15ull) + 0x40 + f.path.size() + (keep_loose(f.path.c_str()) ? f.size : 0);
+    mkdir(dir.c_str(), 0755);
+    struct statvfs fs;
+    if (statvfs(dir.c_str(), &fs) == 0 && uint64_t(fs.f_bavail) * fs.f_frsize < need) {
+        char m[160];
+        snprintf(m, sizeof m, pt ? "4|precisa de %.1f GB livres; há %.1f GB" : "4|needs %.1f GB free; %.1f GB free", need / 1e9,
+                 double(fs.f_bavail) * fs.f_frsize / 1e9);
+        return env->NewStringUTF(m);
+    }
+    std::vector<RomfsEntry> entries;
+    for (auto &f : files) entries.push_back({f.path.c_str(), f.size});
+    std::string romfs = dir + "/romfs", part = dir + "/aoc.bin.part", bin = dir + "/aoc.bin";
+    mkdir(romfs.c_str(), 0755);
+    g_dlc_frac = 0;
+    char why[256] = "";
+    nx::RomfsFeed feed(*dlc, nullptr);
+    bool ok = romfs_build_entries(entries.data(), int(entries.size()), &nx::RomfsFeed::open_fd, &feed, part.c_str(), romfs.c_str(),
+                                  keep_loose, dlc_progress, why, sizeof why);
+    const nx::Error *fe = feed.finish();
+    g_dlc_frac = -1;
+    if (ok && !fe && romfs_image_ok(part.c_str(), why, sizeof why) && rename(part.c_str(), bin.c_str()) == 0) {
+        fprintf(stderr, "[launcher] DLC installed from its package: %zu files\n", files.size());
+        return env->NewStringUTF(("0|" + std::to_string(files.size())).c_str());
+    }
+    unlink(part.c_str());
+    std::string d = fe ? said(*fe) : why[0] ? why : "could not build the DLC's data image";
+    fprintf(stderr, "[launcher] DLC image: %s\n", d.c_str());
+    return env->NewStringUTF(("4|" + d).c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeDlcDone(JNIEnv *env, jclass,
@@ -1797,6 +1866,8 @@ static void prelaunch_tab(float sc) {
                                      "larger pack (01007EF00011F001, 7,094 files, about 1.4 GB) holds both; the other "
                                      "one is only the Ballad's unlock and isn't needed. The DLC isn't included with "
                                      "BOTWRecompAndroid."));
+        ImGui::TextDisabled("%s", tr("Or choose the DLC's own NSP or XCI (Install from NSP/XCI): it uses the keys chosen or "
+                                     "remembered under Game Files > Import from NSP/XCI."));
         ImGui::Text("%s", tr(have ? "Installed." : "Not installed."));
         float f = g_dlc_frac;
         if (dbusy && f >= 0) ImGui::Text(tr("Installing the DLC... %d%%"), (int)(f * 100));
@@ -1806,6 +1877,13 @@ static void prelaunch_tab(float sc) {
             g_dlc_busy = true, g_dlc_msg.clear();
             pthread_mutex_unlock(&g_lock);
             android_call("pickDlcFolder");  // (then importDlc -> nativeBuildDlc -> nativeDlcDone)
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Install from NSP/XCI"))) {  // (the keys: Game Files > Import from NSP/XCI's)
+            pthread_mutex_lock(&g_lock);
+            g_dlc_busy = true, g_dlc_msg.clear();
+            pthread_mutex_unlock(&g_lock);
+            android_call("pickDlcPackage");  // (then importDlcPackage -> nativeBuildDlcPackage -> nativeDlcDone)
         }
         if (have) {
             ImGui::SameLine();

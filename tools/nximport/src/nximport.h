@@ -22,6 +22,14 @@ namespace nx {
 constexpr uint64_t BOTW_TITLE_ID = 0x01007EF00011E000ull;
 constexpr uint64_t BOTW_PATCH_ID = 0x01007EF00011E800ull;
 
+// What RomfsFeed (and the extraction) reads: a RomFS's files, each read checked against its hash tree
+class RomfsSource {
+public:
+    virtual ~RomfsSource() = default;
+    virtual const RomfsListing &romfs() const = 0;
+    virtual void read_romfs(size_t file, void *dst, uint64_t n, uint64_t off) const = 0;
+};
+
 struct ImportInput {
     ReaderPtr base;  // .nsp or .xci
     PackageKind base_kind = PackageKind::NSP;
@@ -32,7 +40,7 @@ struct ImportInput {
 
 using Progress = std::function<void(uint64_t done, uint64_t total)>;
 
-class Importer {
+class Importer : public RomfsSource {
 public:
     explicit Importer(const ImportInput &in);
     ~Importer();
@@ -44,8 +52,8 @@ public:
     // exefs/: main, main.npdm, rtld, sdk, subsdk* (the update's when there is one: it replaces the base's)
     const std::vector<Entry> &exefs() const;
     // romfs/: the RomFS (the update applied over the base's), every read checked against its hash tree
-    const RomfsListing &romfs() const;
-    void read_romfs(size_t file, void *dst, uint64_t n, uint64_t off) const;
+    const RomfsListing &romfs() const override;
+    void read_romfs(size_t file, void *dst, uint64_t n, uint64_t off) const override;
     // The first bytes of romfs/System/Version.txt ("" without one), as the app's romfs check takes them
     std::string version_txt() const;
     uint64_t total_bytes() const;  // exefs + romfs file data
@@ -68,6 +76,32 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+// The Expansion Pass from its own package (NSP or XCI; ImportInput's base - update unused): the AddOnContent CNMTs of
+// Breath of the Wild in it, and the RomFS of the pack that holds the DLC's data (System/AocVersion.txt with Pack/:
+// 01007EF00011F001, the Master Trials' and the Champions' Ballad's content). A package holding only the other one (the
+// Ballad's unlock: System/AocVersion.txt alone) throws DlcUnlockOnly.
+class DlcImporter : public RomfsSource {
+public:
+    explicit DlcImporter(const ImportInput &in);
+    ~DlcImporter();
+    uint64_t title_id() const;
+    uint32_t version() const;
+    const RomfsListing &romfs() const override;
+    void read_romfs(size_t file, void *dst, uint64_t n, uint64_t off) const override;
+    std::vector<std::string> describe() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+class DlcUnlockOnly : public Error {
+public:
+    DlcUnlockOnly()
+        : Error("That package is only the Champions' Ballad's unlock: choose the one with the DLC's data (01007EF00011F001)",
+                "Esse pacote é só o desbloqueio do Champions' Ballad: escolha o que tem os dados da DLC (01007EF00011F001)") {}
 };
 
 }  // namespace nx

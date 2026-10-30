@@ -419,7 +419,7 @@ Bytes cnmt(uint64_t title_id, uint32_t version, uint8_t meta_type, uint64_t appl
     b[0xC] = meta_type;
     put16(b, 0xE, uint16_t(ext));
     put16(b, 0x10, uint16_t(records.size()));
-    put64(b, 0x20, meta_type == nx::META_PATCH ? application_id : title_id | 0x800);
+    put64(b, 0x20, meta_type == nx::META_PATCH || meta_type == nx::META_ADDON ? application_id : title_id | 0x800);
     for (size_t i = 0; i < records.size(); i++) {
         size_t at = 0x20 + ext + 0x38 * i;
         nx::sha256(records[i].nca.data(), records[i].nca.size(), &b[at]);

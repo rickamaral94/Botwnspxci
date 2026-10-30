@@ -211,6 +211,25 @@ e o `prod.keys` de teste (chaves aleatórias, nada da Nintendo), para exercitar 
   - `onTimeout` (Android 15+, limite de 6 h/24 h para `dataSync`) cancela a importação de forma limpa e tira o
     serviço do foreground.
 
+### DLC a partir de NSP/XCI (Configurações → DLC → Instalar de NSP/XCI)
+
+- **Leitura:** o `nx::DlcImporter` lê os CNMTs `AddOnContent` do pacote cujo `application_id` é o do BOTW e escolhe o
+  pacote com os dados: `System/AocVersion.txt` com `Pack/`, que é o `01007EF00011F001`, Master Trials mais Champions'
+  Ballad. Se só houver o desbloqueio do Ballad (`…F002`), o aviso é o mesmo da instalação por pasta. DLC de outro jogo
+  é recusada.
+- **Verificação:** a NCA de dados é decifrada com a key area ou com a title key (ticket do pacote ou `title.keys`), e
+  cada leitura é conferida pela árvore IVFC.
+- **Gravação:** o `dlc/aoc.bin` é montado pelo mesmo `runtime/romfs_build.c`, via `RomfsFeed`, primeiro em
+  `aoc.bin.part`. Depois de passar no `romfs_image_ok`, é renomeado para `aoc.bin`, então uma DLC já instalada continua
+  até a nova estar completa. Os vídeos ficam soltos em `dlc/romfs`, como antes.
+- **Chaves:** as escolhidas ou lembradas em Arquivos do jogo → Importar NSP/XCI.
+- **Testes** (`tests/test_dlc.cpp`):
+  - NSP com os dois pacotes: o de dados é o escolhido;
+  - só o de desbloqueio;
+  - DLC de outro jogo;
+  - o pacote do jogo base passado como DLC;
+  - o `aoc.bin` gerado pela feed igual ao gerado a partir da pasta.
+
 ### Instalação transacional (`android/botwrecompandroid/app/src/main/cpp/package_import.cpp`)
 
 1. Abre os pacotes. Um descritor sem acesso aleatório é recusado antes de qualquer outra coisa.
@@ -251,6 +270,6 @@ Testes de host (`tests/test_package_import.cpp`, com o `romfs_build.c` de verdad
 | Fase | Conteúdo | Estado |
 | --- | --- | --- |
 | 1 | CLI com base (NSP/XCI, chaves, NCA, integridade, romfs, testes) | **feita** |
-| 2 | Update (BKTR: IndirectStorage + AesCtrEx), `verify.sh`, scripts | **feita**: BKTR implementado; **falta validar** com arquivos reais e o hactool |
+| 2 | Update (BKTR: IndirectStorage + AesCtrEx), `verify.sh`, scripts | **feita**: base 1.0.0 e update 1.8.2 importados no aparelho (Odin 2) |
 | 3 | App Android (SAF, instalação transacional, serviço, chaves) | **feita**: compila (NDK e javac); **falta** a build do APK e o teste no aparelho |
 | 4 | APK compilado e importação completa no aparelho | pendente |

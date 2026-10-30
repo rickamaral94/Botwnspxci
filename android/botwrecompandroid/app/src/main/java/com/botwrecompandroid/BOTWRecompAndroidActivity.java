@@ -85,6 +85,8 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             REQ_DRIVER_RECOVER = 0x4c48, REQ_SAVE_IN = 0x4c49, REQ_SAVE_OUT = 0x4c4a, REQ_SAVE_IN_TREE = 0x4c4c,
             REQ_DLC = 0x4c4d;
     private native String nativeBuildDlc(String[] paths, long[] sizes);
+    private static native String nativeBuildDlcPackage(int fd, boolean xci, int prodKeysFd, int titleKeysFd);
+    private static final int REQ_DLC_PKG = 0x4c4e;
     private static native void nativeDlcDone(int result, String detail);
     // Import from NSP/XCI (runtime/ui/launcher.mm, package_import.cpp; docs/IMPORT-NSP-XCI.md)
     private static native void nativePackagePicked(int slot, String name);
@@ -400,6 +402,12 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
                 if (!installDriver(this, f).isEmpty()) restartApp();
                 else runOnUiThread(() -> showDriverError(getString(R.string.driver_not_a_package)));
             }, "driver").start();
+            return;
+        }
+        if (req == REQ_DLC_PKG) {
+            Uri u = result == Activity.RESULT_OK && data != null ? data.getData() : null;
+            if (u == null) nativeDlcDone(DLC_CANCELLED, "");
+            else new Thread(() -> importDlcPackage(u), "dlc-package").start();
             return;
         }
         if (req == REQ_DLC) {
@@ -753,6 +761,47 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
                 nativeDlcDone(DLC_FAILED, e.toString());
             }
         });
+    }
+
+    // The DLC's own NSP/XCI (Settings > DLC > Install from NSP/XCI): read in place, with the keys of Game Files > Import
+    // from NSP/XCI (chosen there, or remembered)
+    public static void pickDlcPackage() {
+        self.runOnUiThread(() -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            try {
+                self.startActivityForResult(i, REQ_DLC_PKG);
+            } catch (Exception e) {
+                Log.e(TAG, "DLC package picker", e);
+                nativeDlcDone(DLC_FAILED, e.toString());
+            }
+        });
+    }
+
+    private void importDlcPackage(Uri u) {
+        try {
+            File kept = new File(keysDir(), "prod.keys"), keptTitle = new File(keysDir(), "title.keys");
+            if (pkgUri[2] == null && !kept.isFile()) {
+                nativeDlcDone(DLC_FAILED, "prod.keys: choose them under Game Files > Import from NSP/XCI first");
+                return;
+            }
+            String name = displayName(this, u).toLowerCase(java.util.Locale.ROOT);
+            BuildService.startImport(this);
+            try {
+                int fd = openFd(u);
+                int prodFd = pkgUri[2] != null ? openFd(pkgUri[2]) : openFd(kept);
+                int titleFd = pkgUri[3] != null ? openFd(pkgUri[3]) : keptTitle.isFile() ? openFd(keptTitle) : -1;
+                String r = nativeBuildDlcPackage(fd, name.endsWith(".xci"), prodFd, titleFd);
+                int bar = r.indexOf('|');
+                nativeDlcDone(Integer.parseInt(r.substring(0, bar)), r.substring(bar + 1));
+            } finally {
+                BuildService.stopImport(this);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "DLC package import", e);
+            nativeDlcDone(DLC_FAILED, e.getMessage() != null ? e.getMessage() : e.toString());
+        }
     }
 
     private boolean dlcBalladOnly;

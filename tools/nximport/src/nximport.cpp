@@ -4,6 +4,7 @@
 #include "cnmt.h"
 #include "nca.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -37,15 +38,11 @@ struct Picked {
     std::string program_name;
 };
 
-struct Importer::Impl {
+// What both importers need: the keys, the packages opened, their tickets and content metadata
+struct Loader {
     KeySet keys;
     std::vector<Ticket> tickets;
     std::vector<Package> packages;
-    Picked base, update;
-    bool has_update = false;
-    std::vector<Entry> exefs;
-    ReaderPtr romfs_image;
-    RomfsListing romfs;
 
     void load_keys(const ImportInput &in) {
         std::vector<uint8_t> t = read_small_file(*in.prod_keys, MAX_PROD_KEYS);
@@ -91,6 +88,15 @@ struct Importer::Impl {
             }
         }
     }
+
+};
+
+struct Importer::Impl : Loader {
+    Picked base, update;
+    bool has_update = false;
+    std::vector<Entry> exefs;
+    ReaderPtr romfs_image;
+    RomfsListing romfs;
 
     Picked pick(const Package &p, uint8_t type, uint64_t title) {
         const Cnmt *found = nullptr;
@@ -302,6 +308,85 @@ std::vector<std::string> Importer::describe() const {
     d.push_back("exefs: " + std::to_string(impl_->exefs.size()) + " files; romfs: " + std::to_string(impl_->romfs.files.size()) +
                 " files, " + std::to_string(impl_->romfs.total_bytes) + " bytes");
     return d;
+}
+
+}  // namespace nx
+
+namespace nx {
+
+struct DlcImporter::Impl : Loader {
+    Cnmt meta;
+    std::string nca_name;
+    ReaderPtr image;
+    RomfsListing romfs;
+};
+
+DlcImporter::DlcImporter(const ImportInput &in) : impl_(new Impl) {
+    Impl &m = *impl_;
+    m.load_keys(in);
+    m.packages.reserve(1);
+    m.packages.push_back(m.open(in.base, in.base_kind));
+    Package &p = m.packages[0];
+    m.read_metas(p);
+    std::vector<const Cnmt *> mine;
+    std::string others;
+    for (auto &c : p.metas) {
+        if (c.type == META_ADDON && c.application_id == BOTW_TITLE_ID) mine.push_back(&c);
+        else others += (others.empty() ? "" : ", ") + tid(c.title_id);
+    }
+    if (mine.empty())
+        fail(p.what + " is not a DLC of Breath of the Wild; it holds: " + (others.empty() ? "none" : others),
+             p.what + " não é uma DLC do Breath of the Wild; ele contém: " + (others.empty() ? "nada" : others));
+    // the pack with the data (System/AocVersion.txt and Pack/); the larger title first when a package has both
+    std::sort(mine.begin(), mine.end(), [](const Cnmt *a, const Cnmt *b) { return a->title_id < b->title_id; });
+    bool unlock_seen = false;
+    for (const Cnmt *c : mine) {
+        const CnmtContent *d = c->find(CNT_DATA);
+        if (!d) continue;
+        const Entry *e = find_entry(p.files, d->file_name());
+        if (!e)
+            fail(p.what + ": the DLC's data " + d->file_name() + " is missing from the package (incomplete dump?)",
+                 p.what + ": os dados da DLC " + d->file_name() + " não estão no pacote (dump incompleto?)");
+        if (e->data->size() != d->size) corrupt(e->name + " (size differs from its CNMT record)");
+        Nca nca(e->data, m.keys, m.tickets);
+        if (nca.content_type() != ContentType::Data && nca.content_type() != ContentType::PublicData)
+            corrupt(e->name + " (not a data NCA)");
+        const Section *rs = nullptr;
+        for (auto &s : nca.sections())
+            if (s.fs_type == FS_ROMFS) rs = &s;
+        if (!rs) corrupt(e->name + " (no RomFS)");
+        ReaderPtr image = nca.open_romfs(*rs);
+        RomfsListing l = list_romfs(*image);
+        bool aoc = false, pack = false;
+        for (auto &f : l.files) {
+            aoc |= f.path == "System/AocVersion.txt";
+            pack |= f.path.compare(0, 5, "Pack/") == 0;
+        }
+        if (aoc && pack) {
+            m.meta = *c, m.nca_name = e->name, m.image = image, m.romfs = std::move(l);
+            return;
+        }
+        unlock_seen |= aoc;
+    }
+    if (unlock_seen) throw DlcUnlockOnly();
+    corrupt(p.what + " (no DLC data in it)");
+}
+
+DlcImporter::~DlcImporter() = default;
+uint64_t DlcImporter::title_id() const { return impl_->meta.title_id; }
+uint32_t DlcImporter::version() const { return impl_->meta.version; }
+const RomfsListing &DlcImporter::romfs() const { return impl_->romfs; }
+
+void DlcImporter::read_romfs(size_t file, void *dst, uint64_t n, uint64_t off) const {
+    const RomfsFile &f = impl_->romfs.files.at(file);
+    check_range(off, n, f.size, f.path.c_str());
+    impl_->image->read(dst, n, add(f.offset, off, f.path.c_str()));
+}
+
+std::vector<std::string> DlcImporter::describe() const {
+    return {"dlc: " + tid(impl_->meta.title_id) + " v" + std::to_string(impl_->meta.version) + " (" + impl_->packages[0].what +
+                ", data " + impl_->nca_name + ")",
+            "dlc romfs: " + std::to_string(impl_->romfs.files.size()) + " files, " + std::to_string(impl_->romfs.total_bytes) + " bytes"};
 }
 
 }  // namespace nx

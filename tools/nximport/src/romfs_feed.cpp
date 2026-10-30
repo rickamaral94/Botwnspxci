@@ -10,7 +10,7 @@ namespace nx {
 
 enum : uint64_t { FEED_CHUNK = 1u << 20 };
 
-RomfsFeed::RomfsFeed(const Importer &imp, const std::atomic<bool> *cancel) : imp_(imp), cancel_(cancel) {}
+RomfsFeed::RomfsFeed(const RomfsSource &imp, const std::atomic<bool> *cancel) : imp_(imp), cancel_(cancel) {}
 
 RomfsFeed::~RomfsFeed() { finish(); }
 

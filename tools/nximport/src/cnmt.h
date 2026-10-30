@@ -25,7 +25,7 @@ struct Cnmt {
     uint64_t title_id;
     uint32_t version;
     uint8_t type;
-    uint64_t application_id;  // a patch's application (its extended header); the title id itself for an application
+    uint64_t application_id;  // a patch's or an add-on's application (its extended header); an application's own id
     std::vector<CnmtContent> contents;
     const CnmtContent *find(uint8_t type) const;
 };
