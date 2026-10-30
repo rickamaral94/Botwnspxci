@@ -159,4 +159,9 @@ Odin 2 Portal, Turnip 27, 1.8.2, Sync lag desligado (com ele, o Link afunda):
 - **Agora o padrão volta às cópias.** A opção **Vídeo > Constant buffers lidos no lugar (experimental)** liga a
   leitura no lugar para teste.
 - O "Medir e comparar" continua alternando a leitura no lugar, com ou sem a opção ligada.
+- **Confirmado no Odin 2 Portal (30/10):** com a opção desligada e a geração de quadros 2x ligada, o Link não afunda.
+  - A causa do afundamento era a leitura no lugar, mesmo com o Sync lag desligado.
+  - A explicação antiga do projeto (o Sync lag deixa a CPU um quadro à frente) não basta: algum buffer que alimenta
+    as alturas do terreno é reescrito pela CPU antes de a GPU usá-lo, também sem o lag.
+  - A opção fica experimental e desligada.
 
