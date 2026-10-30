@@ -47,9 +47,9 @@ Windows, Linux or macOS may still be used as development hosts with the Android 
 > tested and reviewed by a human.
 
 > [!NOTE]
-> **No game files or DLC are included.** You need your own legally obtained, extracted game files (`exefs` and
-> `romfs`). The app does not open NSP/XCI files or use `prod.keys`. Instructions on obtaining game files are not
-> provided.
+> **No game files or DLC are included.** You need your own legally obtained game: an extracted folder (`exefs`
+> and `romfs`), or an NSP/XCI dumped from your own console together with that console's keys (see
+> [Importing from NSP/XCI](#importing-from-nspxci)). Instructions on obtaining game files or keys are not provided.
 
 ## Installing (beta)
 
@@ -68,6 +68,24 @@ Windows, Linux or macOS may still be used as development hosts with the Android 
 Updating from 0.2.x to 0.2.3-beta does not require rebuilding game code. Shaders compile again once, so the first
 minutes may stutter. To report a problem, open an [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) with
 your phone, GPU, driver, game version and a log from **Settings > Files > Save a log file**.
+
+## Importing from NSP/XCI
+
+The app (and the `nximport` tool on a PC) can set the game up straight from an NSP or XCI, with an update NSP and DLC
+NSP/XCI too, using the `prod.keys` (and, when the package has no ticket, `title.keys`) from **your own console**. No
+keys come with this project, and none are downloaded.
+
+- **In the app:** **Game Files > Import from NSP/XCI > Game package** (and **Update**), then **prod.keys** / **title.keys**, then
+  **Import**. The previous setup stays playable until the new one is complete and checked. **Remember the keys**
+  keeps them in the app's private storage, excluded from backups and device transfer; **Forget the keys** deletes
+  them. **Verify packages** checks each NCA against its SHA-256 in the package's metadata, useful when an import
+  reports damaged data. DLC: **Settings > DLC > Install from NSP/XCI**.
+- **On a PC:** `tools/nximport` builds a CLI that writes `Dump/01007EF00011E000/{exefs,romfs}`;
+  `android/build_gamelib.sh` and `android/push_game.sh` accept `--nsp/--xci … [--update …] --keys … [--title-keys …]`.
+- Every block read is checked against the hashes in the package (and the update's patched RomFS against the update's
+  own hashes), so a successful import is the game's data exactly. NSZ/XCZ are not supported.
+
+Details, formats and tests: [docs/IMPORT-NSP-XCI.md](docs/IMPORT-NSP-XCI.md).
 
 ## Testing on Android (developers)
 
@@ -118,7 +136,10 @@ Bug reports, device tests, and contributions are also greatly appreciated.
   [shaderc](https://github.com/google/shaderc) (Apache 2.0), [FFmpeg](https://ffmpeg.org) (LGPL),
   [LZ4](https://github.com/lz4/lz4) (BSD-2-Clause), [Capstone](https://www.capstone-engine.org) (BSD-3-Clause),
   [Unicorn](https://www.unicorn-engine.org) (GPLv2, built from its source by `android/deps/build_unicorn.sh`),
+  [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache 2.0, AES and SHA-256 for the NSP/XCI import),
   [Python](https://www.python.org) (PSF) and [Zig](https://ziglang.org) (MIT) for the phone-side build.
+- [hactool](https://github.com/SciresM/hactool) by SciresM (ISC), the reference for the Switch package formats
+  (no code taken) and for `tools/nximport/verify.sh`.
 - [Mesa](https://www.mesa3d.org)'s Turnip driver (MIT), which players load themselves.
 - Fonts: [Baloo 2](https://github.com/EkType/Baloo2) (OFL), DejaVu Sans (Bitstream Vera license). The Android robot
   is reproduced or modified from work created and shared by Google (CC BY 3.0).

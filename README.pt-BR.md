@@ -49,9 +49,10 @@ Windows, Linux e macOS podem continuar sendo usados como ambientes de desenvolvi
 > testado e revisado por um humano.
 
 > [!NOTE]
-> **Nenhum arquivo do jogo ou DLC vem incluído.** Você precisa dos seus próprios arquivos do jogo, obtidos legalmente
-> e extraídos (`exefs` e `romfs`). O app não abre NSP/XCI nem usa `prod.keys`. Não serão dadas instruções de como
-> obter os arquivos.
+> **Nenhum arquivo do jogo ou DLC vem incluído.** Você precisa do seu próprio jogo, obtido legalmente: uma pasta
+> extraída (`exefs` e `romfs`) ou um NSP/XCI do seu próprio console junto com as chaves desse console (veja
+> [Importar a partir de NSP/XCI](#importar-a-partir-de-nspxci)). Não serão dadas instruções de como obter os arquivos
+> ou as chaves.
 
 ## Instalando (beta)
 
@@ -71,6 +72,24 @@ Atualizar da 0.2.x para a 0.2.3-beta não exige recompilar o código do jogo. Os
 vez, então os primeiros minutos podem ter travadinhas. Para relatar um problema, abra uma
 [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) com celular, GPU, driver, versão do jogo e um log de
 **Configurações > Arquivos > Salvar um arquivo de log**.
+
+## Importar a partir de NSP/XCI
+
+O app (e a ferramenta `nximport` no PC) monta o jogo direto de um NSP ou XCI, também com um NSP de atualização e
+DLCs em NSP/XCI, usando as `prod.keys` (e, quando o pacote não tem ticket, as `title.keys`) do **seu próprio
+console**. Nenhuma chave vem com este projeto nem é baixada.
+
+- **No app:** **Arquivos do jogo > Importar NSP/XCI > Pacote do jogo** (e **Update**), depois **prod.keys** / **title.keys** e
+  **Importar**. O setup anterior continua jogável até o novo estar completo e conferido. **Lembrar as chaves** guarda
+  as chaves no armazenamento privado do app, fora de backups e da transferência entre aparelhos; **Apagar as
+  chaves** apaga. **Verificar pacotes** confere cada NCA contra o SHA-256 dos metadados do pacote, útil quando uma
+  importação acusa dados danificados. DLC: **Configurações > DLC > Instalar de NSP/XCI**.
+- **No PC:** `tools/nximport` gera um CLI que grava `Dump/01007EF00011E000/{exefs,romfs}`;
+  `android/build_gamelib.sh` e `android/push_game.sh` aceitam `--nsp/--xci … [--update …] --keys … [--title-keys …]`.
+- Cada bloco lido é conferido contra os hashes do pacote (e o RomFS da atualização, já com o patch, contra os hashes
+  da própria atualização), então uma importação concluída é exatamente o conteúdo do jogo. NSZ/XCZ não são suportados.
+
+Detalhes, formatos e testes: [docs/IMPORT-NSP-XCI.md](docs/IMPORT-NSP-XCI.md).
 
 ## Testando no Android (desenvolvedores)
 
@@ -113,7 +132,10 @@ correções específicas. Relatos de bugs, testes em outros aparelhos e contribu
   [shaderc](https://github.com/google/shaderc) (Apache 2.0), [FFmpeg](https://ffmpeg.org) (LGPL),
   [LZ4](https://github.com/lz4/lz4) (BSD-2-Clause), [Capstone](https://www.capstone-engine.org) (BSD-3-Clause),
   [Unicorn](https://www.unicorn-engine.org) (GPLv2, compilado do código-fonte por `android/deps/build_unicorn.sh`),
+  [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache 2.0, AES e SHA-256 da importação de NSP/XCI),
   [Python](https://www.python.org) (PSF) e [Zig](https://ziglang.org) (MIT) para a compilação no celular.
+- [hactool](https://github.com/SciresM/hactool), de SciresM (ISC), referência dos formatos de pacote do Switch
+  (nenhum código copiado) e do `tools/nximport/verify.sh`.
 - O driver Turnip do [Mesa](https://www.mesa3d.org) (MIT), que os jogadores carregam por conta própria.
 - Fontes: [Baloo 2](https://github.com/EkType/Baloo2) (OFL), DejaVu Sans (licença Bitstream Vera). O robô do Android
   é reproduzido ou modificado a partir de trabalho criado e compartilhado pelo Google (CC BY 3.0).

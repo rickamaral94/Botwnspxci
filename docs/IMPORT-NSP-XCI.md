@@ -271,5 +271,8 @@ Testes de host (`tests/test_package_import.cpp`, com o `romfs_build.c` de verdad
 | --- | --- | --- |
 | 1 | CLI com base (NSP/XCI, chaves, NCA, integridade, romfs, testes) | **feita** |
 | 2 | Update (BKTR: IndirectStorage + AesCtrEx), `verify.sh`, scripts | **feita**: base 1.0.0 e update 1.8.2 importados no aparelho (Odin 2) |
-| 3 | App Android (SAF, instalação transacional, serviço, chaves) | **feita**: compila (NDK e javac); **falta** a build do APK e o teste no aparelho |
-| 4 | APK compilado e importação completa no aparelho | pendente |
+| 3 | App Android (SAF, instalação transacional, serviço, chaves) | **feita** |
+| 4 | APK compilado, importação completa no aparelho, DLC por NSP/XCI, READMEs | **feita**: APK de debug, base 1.0.0 + update 1.8.2 + DLC importados no aparelho (Odin 2) |
+
+O BKTR foi validado pela verificação IVFC do update no aparelho (o RomFS com patch confere com os hashes da própria
+atualização). A comparação com o hactool (`verify.sh`) não foi executada aqui.
