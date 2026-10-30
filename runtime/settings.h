@@ -43,6 +43,7 @@ typedef struct {
     bool framegen;          // Video > Frame generation 2x (Lossless.dll's shaders): applies when the game starts (vulkan/framegen.cpp)
     int fg_flow;            // its flow scale: 0 100%, 1 75%, 2 50% (the motion estimated at that share of the size)
     bool fg_performance;    // its performance mode (LSFG 3.1P)
+    bool cbuf_inplace;      // Video > Constant buffers read in place (experimental; only with Sync lag off): vulkan/exec.c
     int fps_mode;         // 0: the game's own choice (30 / 60, the frame pacer), 1: 30 fps, 2: 60 fps
     bool shader_int32;    // shader address math in 32-bit words even where the driver offers 64-bit (vulkan/exec.c)
     bool native_code;     // Android: the game's own code on the CPU, no build of it (runtime/native.c); off by default

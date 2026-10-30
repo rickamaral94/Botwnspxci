@@ -51,6 +51,7 @@ Settings g_settings = {
     .framegen = false,
     .fg_flow = 2,
     .fg_performance = false,
+    .cbuf_inplace = false,
     .fps_mode = 1,  // (30: the game's own choice dropped the overworld to 20, where the GPU's clocks settled low)
     .res_mode = 1,  // (1x: the Switch's 900p scene, the HUD at the screen's resolution - Match display drew the scene at
                     // 2560x1440 on the POCO F7 Ultra: 22 fps)
@@ -206,6 +207,7 @@ void settings_reset_defaults(void) {
     g_settings.framegen = d->framegen;
     g_settings.fg_flow = d->fg_flow;
     g_settings.fg_performance = d->fg_performance;
+    g_settings.cbuf_inplace = d->cbuf_inplace;
     g_settings.shader_int32 = d->shader_int32;
     g_settings.sync_lag = d->sync_lag;
     g_settings.native_code = d->native_code;
@@ -252,6 +254,7 @@ void settings_load(void) {
         else if (!strcmp(key, "framegen")) g_settings.framegen = atoi(val) != 0;
         else if (!strcmp(key, "framegen_flow")) g_settings.fg_flow = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 2;
         else if (!strcmp(key, "framegen_performance")) g_settings.fg_performance = atoi(val) != 0;
+        else if (!strcmp(key, "cbuf_inplace")) g_settings.cbuf_inplace = atoi(val) != 0;
         else if (!strcmp(key, "frame_rate")) g_settings.fps_mode = !strcmp(val, "30") ? 1 : !strcmp(val, "60") ? 2 : 0;
         else if (!strcmp(key, "shader_int32")) g_settings.shader_int32 = atoi(val) != 0;
         else if (!strcmp(key, "sync_lag")) g_settings.sync_lag = atoi(val) != 0;
@@ -337,8 +340,8 @@ void settings_save(void) {
     fprintf(f, "touch_controls = %d\n", g_settings.touch_controls);
     fprintf(f, "frame_rate = %s\n", g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : "auto");
     fprintf(f, "cutscenes_60 = %d\n", g_settings.event_fps_unlock);
-    fprintf(f, "framegen = %d\nframegen_flow = %d\nframegen_performance = %d\n", g_settings.framegen, g_settings.fg_flow,
-            g_settings.fg_performance);
+    fprintf(f, "framegen = %d\nframegen_flow = %d\nframegen_performance = %d\ncbuf_inplace = %d\n", g_settings.framegen,
+            g_settings.fg_flow, g_settings.fg_performance, g_settings.cbuf_inplace);
     fprintf(f, "shader_int32 = %d\nsync_lag = %d\nnative_code = %d\nfiles_in_place = %d\n", g_settings.shader_int32,
             g_settings.sync_lag, g_settings.native_code, g_settings.files_in_place);
     static const char *const tri[] = {"auto", "0", "1"};  // (-1 / 0 / 1)

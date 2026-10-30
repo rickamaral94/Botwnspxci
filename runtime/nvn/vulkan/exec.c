@@ -3830,7 +3830,10 @@ static bool inplace_cbufs(void) {
     if (env == -2) env = getenv("LARECOMP_INPLACE_CBUF") ? atoi(getenv("LARECOMP_INPLACE_CBUF")) : -1;
     int ab = AB("inplace");
     // (the measurement's comparison, diag_request_ab, only where it would be on: never with the lag)
-    bool on = env >= 0 ? env > 0 : ab >= 0 ? ab == 1 : !g_sync_lag_now && g_diag_ab != 0;
+    // Off by default since 2026-10-30: with it on, Link's legs sank again on the Odin 2 Portal with the Sync lag off
+    // (the terrain's heights for the feet come from GPU passes reading these buffers) - Video > Constant buffers read in
+    // place turns it on, to test; the measurement's comparison runs it either way.
+    bool on = env >= 0 ? env > 0 : ab >= 0 ? ab == 1 : !g_sync_lag_now && (g_diag_ab >= 0 ? g_diag_ab == 1 : g_settings.cbuf_inplace);
     static int last = -1;
     if (gmem_placed && (int)on != last) {
         LOG("[vk] constant buffers read in place: %s\n", on ? "on" : g_sync_lag_now ? "off (sync lag)" : "off");

@@ -712,4 +712,8 @@
  "Modo desempenho da geração de quadros"},
 {"Lossless Scaling's lighter frame generation: cheaper on the GPU, a little less accurate. Applies at once.",
  "A geração de quadros mais leve do Lossless Scaling: mais barata para a GPU, um pouco menos precisa. Vale na hora."},
+{"Constant buffers read in place (experimental)",
+ "Constant buffers lidos no lugar (experimental)"},
+{"With Sync lag off: the GPU reads the game's per-draw constants where the game keeps them instead of copies - less work for the render thread. Being tested: if Link's legs sink into the ground with it on, leave it off. Applies at once.",
+ "Com o Sync lag desligado: a GPU lê as constantes de cada draw onde o jogo as guarda, em vez de cópias - menos trabalho para a thread de render. Em teste: se as pernas do Link afundarem no chão com isso ligado, deixe desligado. Vale na hora."},
 

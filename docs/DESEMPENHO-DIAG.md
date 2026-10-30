@@ -152,3 +152,11 @@ Odin 2 Portal, Turnip 27, 1.8.2, Sync lag desligado (com ele, o Link afunda):
 - **A causa provável:** o governador deixa o clock da GPU baixo, porque o quadro é em série (o jogo, depois a
   tradução, depois a GPU) e a GPU fica parada parte do tempo.
 
+### Desligado por padrão de novo (30/10, à tarde)
+
+- Com a leitura no lugar ligada e o Sync lag desligado, as pernas do Link voltaram a afundar no Odin 2 Portal.
+- As alturas do terreno que posicionam os pés saem de passes de GPU que leem esses buffers.
+- **Agora o padrão volta às cópias.** A opção **Vídeo > Constant buffers lidos no lugar (experimental)** liga a
+  leitura no lugar para teste.
+- O "Medir e comparar" continua alternando a leitura no lugar, com ou sem a opção ligada.
+
