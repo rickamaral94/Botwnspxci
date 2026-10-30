@@ -2,7 +2,7 @@
 
 Estado (30/10/2026):
 - **B0** (licenças e contrato da API): feita.
-- **B1** (extração dos shaders): em andamento.
+- **B1** (extração dos shaders): feita. Falta o teste com o seu DLL no aparelho.
 - **B2** (integração no present): só especificada. O código começa depois da revisão desta especificação.
 
 Este projeto não inclui, não baixa e não redistribui o `Lossless.dll`, os shaders dele ou o SPIR-V traduzido deles.
@@ -131,14 +131,45 @@ generationCount, loader)`:
 - **Device lost:** vem como `VK_ERROR_DEVICE_LOST` nas nossas próprias chamadas (submit, wait), não como exceção da
   biblioteca. Não tem recuperação local; ver "Falhas" em B2.
 
-## B1 — extração (em andamento)
+## B1 — extração (feita; falta o teste com o seu DLL)
 
-- O DLL é escolhido pelo SAF.
-- O **pe-parse** (`ParsePEFromPointer`) lê os recursos RT_RCDATA pelo id numérico. A tabela de nomes e ids
-  (`mipmaps` 255, `generate` 256, ...; 3.1P a partir de 280) vem do `src/extract/extract.cpp` do fork, MIT.
-- O **dxbc** traduz cada recurso, e a renumeração dos bindings segue o `src/extract/trans.cpp` do fork, MIT.
-- Os arquivos gravados são `filesDir/lsfg/spirv/<nome>.spv` e o `MANIFEST`. O DLL não é guardado.
-- Detalhes da validação e da instalação transacional: `docs/FRAMEGEN.md` § B1, completado com a implementação.
+Fica em **Vídeo > Geração de quadros (Lossless Scaling) > Lossless.dll**. O seletor do Android entrega o descritor ao
+nativo (`android/.../cpp/lsfg_extract.cpp`, `lsfg_translate.cpp`):
+- **Leitura:** sequencial até o fim, só em memória, com limite de 512 MB. Funciona também com provedores que não
+  fazem seek. O DLL **não é gravado** em lugar nenhum: nem cópia, nem cache.
+- **Recursos:** o pe-parse (`ParsePEFromPointer`) lê os recursos RT_RCDATA pelo id. A tabela de nomes e ids
+  (`mipmaps` 255, `generate` 256, …; o 3.1P vai até 302) é a do `src/extract/extract.cpp` do fork.
+- **Validação em quatro camadas.** Todas precisam passar, senão nada é instalado e o set anterior fica:
+  1. **Ids:** os 52 nomes (3.1 e 3.1P) com recurso no DLL. Se faltar algum, o erro é `MISSING`, com os nomes que
+     faltaram.
+  2. **Tradução:** cada recurso passa pelo dxbc do DXVK (o dxbc grava SPIR-V 1.6). Depois os bindings são
+     renumerados na ordem em que aparecem, como no `trans.cpp` do fork. Exceções do dxbc são capturadas.
+  3. **SPIR-V válido:** `spvValidate` do SPIRV-Tools, que já vem no `libshaderc_shared` do app, no ambiente Vulkan
+     1.3.
+  4. **Bindings:** conferidos contra o que o framegen dá a cada shader: buffers uniformes, samplers, imagens
+     amostradas e storage images. A tabela `lsfg_expect.inc` é **gerada** dos fontes do framegen por
+     `tools/lsfg_expect.py`. Também é exigido um entry point GLCompute.
+- **Instalação transacional:**
+  - os arquivos vão para `filesDir/lsfg/spirv.importing/<nome>.spv`, mais um `MANIFEST` com o formato, a versão do
+    extrator, os commits do lsfg-vk-android e do dxbc, o SHA-256 e o tamanho do DLL, o número de shaders, as
+    `OpCapability` e a marca `complete`. Cada arquivo e o diretório levam `fsync`;
+  - depois vem a troca `spirv` → `spirv.old`, `spirv.importing` → `spirv`, e o `spirv.old` é apagado;
+  - no início do app, `lsfg_startup` apaga o stage e, se o app morreu entre os dois renames, devolve o `spirv.old`;
+  - um MANIFEST de outra versão do extrator conta como "não importado".
+- **Estado no menu:** "Não importado", "Importando…", "Shaders prontos — 52 shaders, Lossless.dll <sha>" ou
+  "Incompatível — <motivo>". O botão **Remover shaders** apaga `filesDir/lsfg/`.
+- **Log:** `[lsfg] Lossless.dll: result N, …, sha256 …` e as capabilities dos shaders. As capabilities são as features
+  que a B2 vai exigir do device.
+- **Testes de host:** `tools/lsfg_extract_tests`, com ASan e UBSan. Usam um PE32+ sintético com recursos falsos e um
+  tradutor falso que gera SPIR-V com os bindings pedidos. **Nenhum arquivo do Lossless Scaling** é usado. Cobrem:
+  - instalação completa;
+  - id faltando, tradução falhando, bindings errados e validador recusando, sempre com o set anterior intacto;
+  - não-PE, PE truncado em vários pontos e bytes trocados;
+  - parser de SPIR-V com prefixos e bit flips;
+  - recuperação: stage interrompido, troca cortada e versão do extrator;
+  - o dxbc real com lixo, que precisa falhar de forma limpa.
+- **Não verificado:** o caminho completo com um Lossless.dll real, em particular se o `spvValidate` aceita tudo o que
+  o dxbc gera. Se recusar, a mensagem com o shader e o motivo aparece no menu e no log.
 
 ## B2 — especificação (para revisão; nada implementado)
 

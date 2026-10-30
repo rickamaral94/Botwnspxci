@@ -87,6 +87,8 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     private native String nativeBuildDlc(String[] paths, long[] sizes);
     private static native String nativeBuildDlcPackage(int fd, boolean xci, int prodKeysFd, int titleKeysFd);
     private static final int REQ_DLC_PKG = 0x4c4e;
+    private static native String nativeLsfgImport(int fd);
+    private static final int REQ_LSFG = 0x4c53;
     private static native void nativeDlcDone(int result, String detail);
     // Import from NSP/XCI (runtime/ui/launcher.mm, package_import.cpp; docs/IMPORT-NSP-XCI.md)
     private static native void nativePackagePicked(int slot, String name);
@@ -402,6 +404,11 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
                 if (!installDriver(this, f).isEmpty()) restartApp();
                 else runOnUiThread(() -> showDriverError(getString(R.string.driver_not_a_package)));
             }, "driver").start();
+            return;
+        }
+        if (req == REQ_LSFG) {
+            Uri u = result == Activity.RESULT_OK && data != null ? data.getData() : null;
+            if (u != null) new Thread(() -> importLosslessDll(u), "lsfg-dll").start();
             return;
         }
         if (req == REQ_DLC_PKG) {
@@ -761,6 +768,30 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
                 nativeDlcDone(DLC_FAILED, e.toString());
             }
         });
+    }
+
+    // The user's own Lossless.dll (Video > Frame generation): read through its descriptor by the native side, which keeps
+    // only the shaders translated from it (filesDir/lsfg/spirv) - the DLL is never copied
+    public static void pickLosslessDll() {
+        self.runOnUiThread(() -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            try {
+                self.startActivityForResult(i, REQ_LSFG);
+            } catch (Exception e) {
+                Log.e(TAG, "Lossless.dll picker", e);
+            }
+        });
+    }
+
+    private void importLosslessDll(Uri u) {
+        try {
+            String r = nativeLsfgImport(openFd(u));
+            Log.i(TAG, "Lossless.dll: " + r);
+        } catch (Exception e) {
+            Log.e(TAG, "Lossless.dll import", e);
+        }
     }
 
     // The DLC's own NSP/XCI (Settings > DLC > Install from NSP/XCI): read in place, with the keys of Game Files > Import

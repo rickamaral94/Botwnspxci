@@ -13,6 +13,10 @@
 #include <vector>
 
 #include "diag.h"
+#ifdef __ANDROID__
+#include "lsfg_extract.h"  // (android/botwrecompandroid/app/src/main/cpp)
+extern "C" void launcher_pick_lossless_dll(void);  // (launcher.mm)
+#endif
 #include "i18n.h"
 #include "imgui.h"
 #include "option_rows.h"
@@ -671,6 +675,23 @@ static void tab_display(void) {
                "Translates the game's shaders with 32-bit address math, the path used for drivers without 64-bit "
                "integers (Adreno 6xx / 7xx and Mali stock drivers). Try it if lighting, grass or text are missing or wrong "
                "on your GPU. Applies to shaders translated from now on: restart the app for all of them.");
+    {   // Frame generation's shaders from the user's own Lossless.dll (docs/FRAMEGEN.md: B1 - the generation itself comes later)
+        opt_section("Frame generation (Lossless Scaling)");
+        char line[512];
+        int st = lsfg_state(line, sizeof line);
+        std::string value = st == 2 ? tr("Importing...") : st == 1 ? tr("Shaders ready") : line[0] ? tr("Not compatible") : tr("Not imported");
+        if (st == 1 || (st == 0 && line[0])) value += std::string(" - ") + line;
+        if (opt_action("Lossless.dll", value.c_str(),
+                       "Your own Lossless.dll from Lossless Scaling (bought on Steam): its frame generation shaders are "
+                       "translated and kept in the app's private storage; the DLL itself is not kept. A Lossless.dll that "
+                       "doesn't fit this version of BOTWRecompAndroid is refused: use a compatible version of Lossless "
+                       "Scaling. The frame generation itself isn't in this version yet.",
+                       false) && st != 2) {
+            launcher_pick_lossless_dll();
+        }
+        if (st == 1 && opt_button("Remove shaders", "Deletes the shaders translated from your Lossless.dll."))
+            lsfg_remove();
+    }
 #endif
     opt_end();
 }

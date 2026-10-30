@@ -134,6 +134,9 @@ correções específicas. Relatos de bugs, testes em outros aparelhos e contribu
   [Unicorn](https://www.unicorn-engine.org) (GPLv2, compilado do código-fonte por `android/deps/build_unicorn.sh`),
   [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache 2.0, AES e SHA-256 da importação de NSP/XCI),
   [Python](https://www.python.org) (PSF) e [Zig](https://ziglang.org) (MIT) para a compilação no celular.
+- [lsfg-vk](https://lsfg-vk.dev) 1.0.0, de PancakeTAS (MIT), via [GameNative/lsfg-vk-android](https://github.com/GameNative/lsfg-vk-android)
+  (MIT), com o dxbc do [DXVK](https://github.com/doitsujin/dxvk) (zlib) e o [pe-parse](https://github.com/trailofbits/pe-parse) (MIT):
+  os shaders da geração de quadros, traduzidos no celular a partir do Lossless.dll do próprio usuário (nenhum incluído).
 - [hactool](https://github.com/SciresM/hactool), de SciresM (ISC), referência dos formatos de pacote do Switch
   (nenhum código copiado) e do `tools/nximport/verify.sh`.
 - O driver Turnip do [Mesa](https://www.mesa3d.org) (MIT), que os jogadores carregam por conta própria.

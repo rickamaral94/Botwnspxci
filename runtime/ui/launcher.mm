@@ -499,6 +499,7 @@ done:
 // picked the same way (a Turnip .zip, copied to the drivers folder the activity loads from at start).
 #include <jni.h>
 #include "package_import.h"  // (android/botwrecompandroid/app/src/main/cpp: Import from NSP/XCI)
+#include "lsfg_extract.h"     // (the same: frame generation's shaders from Lossless.dll)
 #include "nximport.h"        // (tools/nximport: the DLC from its NSP/XCI)
 #include "romfs_feed.h"
 std::atomic<bool> g_android_imported{false};
@@ -528,6 +529,9 @@ static void android_call_int(const char *method, int v) {  // (one int argument)
     env->DeleteLocalRef(c);
     env->DeleteLocalRef(act);
 }
+
+// (menu.mm, Video > Frame generation) the system's file picker for the user's Lossless.dll
+extern "C" void launcher_pick_lossless_dll(void) { android_call("pickLosslessDll"); }
 
 // The log file (Driver compatibility; runtime/platform/android.c): written to a folder the player picks
 // (BOTWRecompAndroidActivity pickLogFolder / openLog), where a file manager can open it - Android/data/ is out of its reach
@@ -854,6 +858,16 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroi
     std::string d = fe ? said(*fe) : why[0] ? why : "could not build the DLC's data image";
     fprintf(stderr, "[launcher] DLC image: %s\n", d.c_str());
     return env->NewStringUTF(("4|" + d).c_str());
+}
+
+// The user's Lossless.dll, picked under Video > Frame generation (BOTWRecompAndroidActivity importLosslessDll): its shaders
+// into filesDir/lsfg/spirv (lsfg_extract.cpp), read through the descriptor - the DLL itself is never stored. The
+// descriptor is owned from here on. Returns "<lsfg::Result>|<detail>"; the menu shows the state (lsfg_state).
+extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeLsfgImport(JNIEnv *env, jclass,
+                                                                                                         jint fd) {
+    char detail[512] = "";
+    int r = lsfg_import_fd(fd, detail, sizeof detail);
+    return env->NewStringUTF((std::to_string(r) + "|" + detail).c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeDlcDone(JNIEnv *env, jclass,
@@ -2014,6 +2028,7 @@ extern "C" void launcher_run(const char *root) {
 
 #ifdef __ANDROID__
     package_import_recover();  // (an NSP/XCI import the app was stopped in: finished, or its half removed)
+    lsfg_startup();            // (a Lossless.dll import the app was stopped in: its half removed)
 #endif
     std::string status = check_game_files(g_root);
 #ifdef __ANDROID__
