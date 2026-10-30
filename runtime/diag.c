@@ -324,10 +324,13 @@ int diag_status(char *msg, size_t n) {
 
 bool diag_want_gpu_ts(void) { return atomic_load_explicit(&g_state, memory_order_relaxed) == 2; }
 
-void diag_displayed(uint64_t t) {
+// (only between images presented one after the other: the platform keeps few past timings, and a gap over a lost one
+// isn't an interval the screen showed)
+void diag_displayed(uint32_t id, uint64_t t) {
+    static uint32_t last_id;
     if (atomic_load(&g_state) != 2 || t <= f_last_shown) return;
-    if (f_last_shown && t - f_last_shown < 200000000ull && f_nshown < FMAX) f_shown[f_nshown++] = t - f_last_shown;
-    f_last_shown = t;
+    if (f_last_shown && id == last_id + 1 && t - f_last_shown < 200000000ull && f_nshown < FMAX) f_shown[f_nshown++] = t - f_last_shown;
+    f_last_shown = t, last_id = id;
 }
 void diag_gpu_composition(uint64_t ns) {
     if (atomic_load(&g_state) == 2 && f_ncomp < FMAX) f_comp[f_ncomp++] = ns;

@@ -1274,7 +1274,7 @@ void vk_frame_end(const char *shot_path) {
         VkPastPresentationTimingGOOGLE past[16];
         uint32_t np = 16;
         if (vkGetPastPresentationTimingGOOGLE(g_vk.dev, g_vk.swapchain, &np, past) >= 0)
-            for (uint32_t i = 0; i < np; i++) diag_displayed(past[i].actualPresentTime);
+            for (uint32_t i = 0; i < np; i++) diag_displayed(past[i].presentID, past[i].actualPresentTime);
     }
 #ifdef __ANDROID__
     if (trace_start) vk_timing_trace_wait(VK_TIMING_PRESENT, SDL_GetTicksNS() - trace_start);

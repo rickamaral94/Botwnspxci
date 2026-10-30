@@ -408,4 +408,14 @@ Código:
   - No 3x, a base de 40 com 2 gerados (≈ 19 + 8 ms) tende a não caber em 25 ms no modo padrão do SoC.
   - O 4x, com base de 30 e 3 gerados (≈ 19 + 12 ms), fica no limite dos 33 ms.
   - A grade se ajusta, mas a medição no aparelho é o que decide.
+- **Primeiro teste do 4x no Odin 2 Portal** (60 s, escala do fluxo 50%, SoC no modo padrão):
+  - o Android deu 120 Hz (`frame rate asked of the window: 120 Hz (0)`, `the screen refreshes at 120.0 Hz`);
+  - o framegen custou 8 a 11 ms de GPU por quadro real (os 3 gerados juntos, ~2,7 a 3,8 ms cada);
+  - **quadros reais:** ~25 por segundo e, num trecho mais pesado, ~20, contra a base de 30. A GPU não fecha os 33 ms
+    (jogo ~19 ms + framegen);
+  - **na tela:** ~100 imagens por segundo e, no trecho pesado, ~80, com mediana de 8,37 ms por imagem, a de 120 Hz.
+- **A média da cadência real desse teste não vale.** O Android guarda poucos tempos passados, e o intervalo era
+  calculado por cima das imagens que faltavam. Agora só conta entre `presentID` consecutivos.
+- **Conclusão provisória:** com o SoC no modo padrão, o 2x (30 → 60 cravado) é o mais estável; o 4x mostra mais
+  imagens, com a base abaixo de 30. Os dois ficam disponíveis.
 
