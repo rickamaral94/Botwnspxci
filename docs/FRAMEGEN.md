@@ -371,4 +371,14 @@ Código:
   `[fg] presentation times (VK_GOOGLE_display_timing): yes/no`.
 - **Desligar a opção** faz a swapchain ser recriada em MAILBOX antes do quadro seguinte. Ligar de novo a recria em
   FIFO.
+- **Resultado no Odin 2 Portal** (60 s, escala do fluxo 50%, SoC no modo padrão):
+  - `presentation times: yes` (present mode 2, FIFO);
+  - **30 quadros reais por segundo** (60–61 a cada 2 s) na maior parte da janela, contra 26–28 antes, sem descartes;
+  - framegen GPU ~4 ms por quadro;
+  - no trecho final, mais pesado, 25–26 reais;
+  - na FIFO, o `vkQueuePresentKHR` às vezes bloqueia (média de 5,7 ms), mas a thread de render ainda sobra 38% do
+    tempo ociosa.
+- **O intervalo que o diagnóstico mostrava era entre as chamadas de present,** não entre o que a tela exibiu. Agora,
+  com `VK_GOOGLE_display_timing`, o relatório também lê do compositor os tempos reais (`actualPresentTime`), na linha
+  "interval between images as the screen showed them": o critério de cadência da especificação.
 

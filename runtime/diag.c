@@ -256,6 +256,8 @@ void diag_pop_(void) {
 // ---------------------------------------------------------------- frames
 #define FMAX 16384
 static uint64_t f_interval[FMAX], f_acquire[FMAX], f_present[FMAX], f_gpu[FMAX], f_comp[FMAX];
+static uint64_t f_shown[FMAX], f_last_shown;  // (the intervals between images as the compositor showed them)
+static int f_nshown;
 static uint8_t f_flags[FMAX];  // 1 gameplay, 2 sampler on, 4 the compared feature on (diag_request_ab)
 static uint64_t f_rcpu[FMAX], f_mcpu[FMAX];  // the render thread's and the main thread's own CPU time per interval
 static int f_n, f_ncomp, f_nmenu;
@@ -295,7 +297,8 @@ void diag_request(int seconds) {
     g_seconds = seconds > 0 ? seconds : 60;
     atomic_store(&win_t0, ~0ull);
     atomic_store(&win_t1, ~0ull);
-    f_n = f_ncomp = f_nmenu = 0;
+    f_n = f_ncomp = f_nmenu = f_nshown = 0;
+    f_last_shown = 0;
     f_last = f_last_gpu = 0;
     cl_n = cl_samples = 0;
     memset(cl_min, 0, sizeof cl_min), memset(cl_max, 0, sizeof cl_max), memset(cl_sum, 0, sizeof cl_sum);
@@ -320,6 +323,12 @@ int diag_status(char *msg, size_t n) {
 }
 
 bool diag_want_gpu_ts(void) { return atomic_load_explicit(&g_state, memory_order_relaxed) == 2; }
+
+void diag_displayed(uint64_t t) {
+    if (atomic_load(&g_state) != 2 || t <= f_last_shown) return;
+    if (f_last_shown && t - f_last_shown < 200000000ull && f_nshown < FMAX) f_shown[f_nshown++] = t - f_last_shown;
+    f_last_shown = t;
+}
 void diag_gpu_composition(uint64_t ns) {
     if (atomic_load(&g_state) == 2 && f_ncomp < FMAX) f_comp[f_ncomp++] = ns;
 }
@@ -655,6 +664,8 @@ static void *report_main(void *arg) {
     stat_line("present interval, gameplay", f_interval, f_n, f_flags, 1, 1);
     stat_line("  of which with the sampler on", f_interval, f_n, f_flags, 3, 3);
     stat_line("  of which with the sampler off", f_interval, f_n, f_flags, 3, 1);
+    if (f_nshown)  // (the compositor's own times - VK_GOOGLE_display_timing - the cadence the screen really had)
+        stat_line("interval between images as the screen showed them", f_shown, f_nshown, NULL, 0, 0);
     stat_line("acquire (vkAcquireNextImageKHR), gameplay", f_acquire, f_n, f_flags, 1, 1);
     stat_line("present call (vkQueuePresentKHR), gameplay", f_present, f_n, f_flags, 1, 1);
     if (g_ab_want) {

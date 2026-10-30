@@ -41,6 +41,8 @@ void diag_note_presenting(uint64_t kthread_id);
 void diag_present(uint64_t acquire_ns, uint64_t present_ns);
 // The final composition's GPU time of a frame (device.c, from timestamps), when diag_want_gpu_ts()
 bool diag_want_gpu_ts(void);
+// When an image was really shown (VK_GOOGLE_display_timing's actualPresentTime, CLOCK_MONOTONIC ns), in order
+void diag_displayed(uint64_t actual_ns);
 void diag_gpu_composition(uint64_t ns);
 
 // Start a measurement of `seconds` of gameplay (it begins once the game is out of its menus for 5 s)

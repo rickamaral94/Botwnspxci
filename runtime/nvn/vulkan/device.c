@@ -1250,6 +1250,12 @@ void vk_frame_end(const char *shot_path) {
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
     DIAG_POP();
     if (pres_t0) diag_present_ns = SDL_GetTicksNS() - pres_t0;
+    if (g_vk.display_timing && diag_want_gpu_ts()) {  // (while measuring: when the compositor really showed the images)
+        VkPastPresentationTimingGOOGLE past[16];
+        uint32_t np = 16;
+        if (vkGetPastPresentationTimingGOOGLE(g_vk.dev, g_vk.swapchain, &np, past) >= 0)
+            for (uint32_t i = 0; i < np; i++) diag_displayed(past[i].actualPresentTime);
+    }
 #ifdef __ANDROID__
     if (trace_start) vk_timing_trace_wait(VK_TIMING_PRESENT, SDL_GetTicksNS() - trace_start);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) recreate_swapchain();  // (SUBOPTIMAL: every frame of an unrotated swapchain)
