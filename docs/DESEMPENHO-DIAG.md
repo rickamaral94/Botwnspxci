@@ -202,3 +202,23 @@ dependem desse número, por isso o relatório agora conta as submissões:
 - não prontas;
 - invertidas;
 - nunca lidas (slot reutilizado antes).
+
+**Resultado do A/B** (Odin 2, framegen 2x, 120 s, trecho pesado):
+
+| | ADPF com as threads do jogo | Só as duas threads de antes |
+| --- | --- | --- |
+| Quadros reais por segundo | 26,32 | 27,33 |
+| p95 da cadência na tela | 33,46 ms | 33,45 ms |
+| Clusters (média, MHz) | 1152 / 2605 / 1977 | 1221 / 2330 / 1887 |
+
+Não houve ganho, e o clock ficou mais alto. Por isso fica **desligado por padrão**; `LARECOMP_ADPF_WORKERS=1` liga.
+
+**Timestamps de GPU:**
+
+- 9193 submissões contadas;
+- 18187 dentro do intervalo de outra, nenhuma perdida ou não lida.
+
+As contidas são submissões leves. O Turnip grava os timestamps delas assim que o processador de comandos chega a
+elas, sem esperar o trabalho anterior. A união dos intervalos continua valendo como tempo ocupado. No trecho pesado a
+dinâmica mede 23–27 ms de GPU por quadro, contra quadros de 36–40 ms. A GPU fica perto do limite no clock que o modo
+padrão dá, e baixar a resolução faz o governador baixar o clock junto.

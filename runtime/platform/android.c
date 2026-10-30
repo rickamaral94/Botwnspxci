@@ -862,17 +862,18 @@ static void adpf_work_locked(int slot, uint64_t work_ns, uint64_t target_ns, uin
                 }
             }
         }
-        // The game's own busiest threads too (LARECOMP_ADPF_WORKERS=0: not). The presenting thread mostly waits for
+        // The game's own busiest threads too (LARECOMP_ADPF_WORKERS=1; off by default). The presenting thread mostly waits for
         // them - 0.6 ms of CPU a frame, against 4-7 ms for the main thread and each of two workers, at 1.9 of the big
         // cores' 3.2 GHz (Odin 2, 2026-10-30) - so the boost a late frame earned went to threads with nothing to do.
         // Every 2 s: up to 3 game threads that used the most CPU (each over 15% of the time; one already in stays while
         // it is among the 4 busiest, so the set doesn't flicker). Settings > Files > Measure and compare turns it on
-        // and off every 10 s (diag.c g_diag_ab).
+        // and off every 10 s (diag.c g_diag_ab). Measured that way (Odin 2, framegen 2x, 2026-10-30): 26.3 real frames a
+        // second with them against 27.3 without, the clusters ~100-270 MHz higher - no gain, so off.
         if (slot == 0 && session[0] && s_presenting_tid > 0 && s_render_tid > 0) {
             static int workers_env = -1, ncur, changes;
             static uint64_t pick_at;
             static int32_t cur[5];
-            if (workers_env < 0) { const char *e = getenv("LARECOMP_ADPF_WORKERS"); workers_env = !e || atoi(e) != 0; }
+            if (workers_env < 0) { const char *e = getenv("LARECOMP_ADPF_WORKERS"); workers_env = e && atoi(e) != 0; }
             extern volatile int g_diag_ab;
             extern int kernel_busiest_threads(int32_t *tids, int max, double min_share, int32_t skip);
             bool want = g_diag_ab >= 0 ? g_diag_ab == 1 : workers_env;
