@@ -704,4 +704,12 @@
  "Indisponível: "},
 {"Off.",
  "Desligada."},
+{"Frame generation flow scale",
+ "Escala do fluxo da geração de quadros"},
+{"The size at which the motion between two frames is estimated, a share of the screen's. Lower: the generation costs the GPU much less, with more mistakes on small moving details. Applies at once.",
+ "O tamanho em que o movimento entre dois quadros é estimado, uma fração do da tela. Menor: a geração custa bem menos para a GPU, com mais erros em detalhes pequenos em movimento. Vale na hora."},
+{"Frame generation performance mode",
+ "Modo desempenho da geração de quadros"},
+{"Lossless Scaling's lighter frame generation: cheaper on the GPU, a little less accurate. Applies at once.",
+ "A geração de quadros mais leve do Lossless Scaling: mais barata para a GPU, um pouco menos precisa. Vale na hora."},
 

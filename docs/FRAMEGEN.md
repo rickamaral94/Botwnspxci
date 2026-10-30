@@ -345,3 +345,14 @@ Código:
 - O "Medir desempenho" conta cada imagem apresentada; o intervalo entre presents deve ficar perto de 16,7 ms.
 - O overlay mostra "framegen 2x: X real / Y shown".
 
+### Primeiro teste no Odin 2 Portal (30/10, SoC no modo padrão, 1920x1080, flow scale 100%)
+
+- **Funcionou**, sem crash: ~1 quadro gerado por quadro real, quase sem descartes.
+- **O framegen custa ~9,8 ms de GPU por quadro gerado.** Somado aos ~19 ms do jogo, os quadros reais caíram para
+  ~25 por segundo, e a tela mostrou ~49.
+- **O que mudou por causa disso:**
+  - **Vídeo > Escala do fluxo da geração de quadros:** 100%, 75% ou **50% (o novo padrão)**. O movimento é estimado
+    nessa fração do tamanho da tela; o framegen recebe `1 / escala`, como na camada do lsfg-vk.
+  - **Modo desempenho:** LSFG 3.1P, com os shaders `p_*` que o extrator já instala.
+  - **Os dois valem na hora:** o framegen é finalizado e iniciado de novo entre dois quadros.
+

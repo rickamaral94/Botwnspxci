@@ -701,6 +701,12 @@ static void tab_display(void) {
             desc += fs == 1 ? tr("On.") : fs == 2 ? tr("On when BOTWRecompAndroid starts again.") : fs == 3 ? tr("Unavailable: ") : tr("Off.");
             if (fs == 3) desc += why;
             opt_toggle("Frame generation 2x", &g_settings.framegen, false, desc.c_str());
+            static const char *flows[] = {"100%", "75%", "50%"};
+            opt_choice("Frame generation flow scale", &g_settings.fg_flow, flows, 3, 2,
+                       "The size at which the motion between two frames is estimated, a share of the screen's. Lower: the "
+                       "generation costs the GPU much less, with more mistakes on small moving details. Applies at once.");
+            opt_toggle("Frame generation performance mode", &g_settings.fg_performance, false,
+                       "Lossless Scaling's lighter frame generation: cheaper on the GPU, a little less accurate. Applies at once.");
         }
         if (st == 1 && opt_button("Remove shaders", "Deletes the shaders translated from your Lossless.dll."))
             lsfg_remove();

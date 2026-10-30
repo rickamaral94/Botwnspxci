@@ -18,9 +18,10 @@ extern "C" {
 enum { LSFGFG_OK = 0, LSFGFG_FAILED = 1, LSFGFG_DEVICE_LOST = 2 };
 
 // Once, on the caller's device and queue (all framegen work is submitted there, by the caller's thread). spirv_dir: the
-// shaders lsfg_extract installed (<name>.spv). flow_scale: lsfg-vk's (1.0 full); generations: frames made per real one.
+// shaders lsfg_extract installed (<name>.spv). flow_scale: lsfg-vk's (0.25..1, 1 the motion at the frame's size);
+// generations: frames made per real one; performance: LSFG 3.1P (lighter). lsfgfg_finalize before another init.
 int lsfgfg_init(PFN_vkGetInstanceProcAddr gipa, VkInstance instance, VkPhysicalDevice phys, VkDevice device, uint32_t queue_family,
-                VkQueue queue, float flow_scale, int generations, const char *spirv_dir, char *err, size_t n);
+                VkQueue queue, float flow_scale, int generations, int performance, const char *spirv_dir, char *err, size_t n);
 // A context over the caller's images (GENERAL layout, kept by the caller): two inputs (the real frame of number k in
 // in[k % 2]) and one output per generated frame. format: the views' (storage-capable).
 int lsfgfg_create(VkImage in0, VkImage in1, const VkImage *out, int nout, uint32_t width, uint32_t height, VkFormat format,

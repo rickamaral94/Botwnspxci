@@ -139,19 +139,32 @@ static void fail(const char *why, int code) {
     release();
 }
 
+static const float flow_of[3] = {1.0f, 0.75f, 0.5f};
+static int lib_flow = -1, lib_perf = -1;  // (what the framegen was initialized with: a change makes it again, at once)
+
 static bool ready(VkExtent2D e) {
     char err[512];
+    int flow = g_settings.fg_flow >= 0 && g_settings.fg_flow <= 2 ? g_settings.fg_flow : 2, perf = g_settings.fg_performance;
+    if (lib_on && (flow != lib_flow || perf != lib_perf)) {
+        release();
+        lsfgfg_finalize();
+        lib_on = false;
+        LOG("[fg] settings changed: the framegen made again\n");
+    }
     if (!lib_on) {
         VkFormatProperties fp;
         vkGetPhysicalDeviceFormatProperties(g_vk.phys, FG_FORMAT, &fp);
         VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
         if ((fp.optimalTilingFeatures & need) != need) { fail("RGBA8 images can't be storage images on this driver", 0); return false; }
-        int r = lsfgfg_init(vkGetInstanceProcAddr, g_vk.inst, g_vk.phys, g_vk.dev, g_vk.qfam, g_vk.queue, 1.0f, 1, fg_dir, err, sizeof err);
+        int r = lsfgfg_init(vkGetInstanceProcAddr, g_vk.inst, g_vk.phys, g_vk.dev, g_vk.qfam, g_vk.queue, flow_of[flow], 1, perf,
+                            fg_dir, err, sizeof err);
         if (r) { fail(err, r); return false; }
         lib_on = true;
+        lib_flow = flow, lib_perf = perf;
         VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 16};
-        if (g_vk.props.limits.timestampComputeAndGraphics && vkCreateQueryPool(g_vk.dev, &qi, NULL, &ts_pool) != VK_SUCCESS) ts_pool = VK_NULL_HANDLE;
-        LOG("[fg] framegen ready (LSFG 3.1, 2x, flow scale 1.0)\n");
+        if (!ts_pool && g_vk.props.limits.timestampComputeAndGraphics && vkCreateQueryPool(g_vk.dev, &qi, NULL, &ts_pool) != VK_SUCCESS)
+            ts_pool = VK_NULL_HANDLE;
+        LOG("[fg] framegen ready (LSFG 3.1%s, 2x, flow scale %.2f)\n", perf ? "P, performance" : "", flow_of[flow]);
     }
     if (ctx_on && (ctx_ext.width != e.width || ctx_ext.height != e.height)) release();
     if (!ctx_on) {
