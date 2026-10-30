@@ -422,3 +422,19 @@ Código:
   - Segue como padrão.
   - 3x e 4x ficam como opção para quem tiver GPU com folga ou rodar com clocks mais altos.
 
+
+### Resolução dinâmica com framegen (30/10)
+
+No trecho pesado, com 2x, os quadros reais caíam para ~28,5/s, e ~5% das imagens ficavam dois períodos na tela. Isso
+acontece porque o quadro real perde o slot dele. A **Resolução interna = Dinâmica** (`nvn/output_scale.c`) olhava só
+o tempo de GPU do jogo. O trabalho do framegen é enviado à parte e não entrava nessa conta, então a escala só caía
+tarde demais.
+
+Agora o orçamento de GPU do quadro real desconta o custo do framegen:
+
+`want_gpu = max(want/2, want − fg_gpu_ms_per_real())`
+
+- O custo é a média dos timestamps do framegen em janelas de 2 s, com EWMA de 0,5.
+- O limiar "lento" e o de "folga" passam a usar `want_gpu`.
+- Com o framegen desligado, o custo é 0, e o comportamento fica igual ao de antes.
+- A linha `[dynres]` mostra `gpu X ms of Y`, onde Y é esse orçamento.

@@ -94,6 +94,7 @@ static VkQueryPool ts_pool;   // (the framegen's GPU time: our timestamps either
 static uint32_t ts_i;
 static bool ts_used[8];
 static uint64_t st_real, st_gen, st_drop, st_gpu_ns, st_gpu_n, st_since;
+static double fg_gpu_ewma_ms;
 static uint64_t win_real, win_shown, win_t0;  // (the overlay's counts, every second)
 static float ov_real, ov_shown;
 
@@ -401,6 +402,10 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
         if (log < 0) log = getenv("LARECOMP_FG_LOG") != NULL;
         if (!st_since) st_since = t;
         if (t - st_since >= 2000000000ull) {
+            if (st_gpu_n) {
+                double ms = st_gpu_ns / 1e6 / (double)st_gpu_n;
+                fg_gpu_ewma_ms = fg_gpu_ewma_ms > 0 ? fg_gpu_ewma_ms * 0.5 + ms * 0.5 : ms;
+            }
             if (log || diag_want_gpu_ts())
                 LOG("[fg] 2 s: %llu real, %llu generated, %llu dropped; framegen GPU %.2f ms a frame; output period %.1f ms\n",
                     (unsigned long long)st_real, (unsigned long long)st_gen, (unsigned long long)st_drop,
@@ -410,6 +415,10 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
     }
     return true;
 }
+
+// (nvn/output_scale.c, Dynamic resolution) the framegen's GPU time per real frame while it runs (its timestamps,
+// averaged over the last 2 s windows), else 0
+double fg_gpu_ms_per_real(void) { return ctx_on && !fg_failed ? fg_gpu_ewma_ms : 0; }
 
 // (ui/perf_overlay.mm) real and shown frames a second, while it runs; false: not running
 bool fg_overlay(float *real, float *shown, int *mult) {
