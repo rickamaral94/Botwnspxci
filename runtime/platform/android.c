@@ -862,6 +862,57 @@ static void adpf_work_locked(int slot, uint64_t work_ns, uint64_t target_ns, uin
                 }
             }
         }
+        // The game's own busiest threads too (LARECOMP_ADPF_WORKERS=0: not). The presenting thread mostly waits for
+        // them - 0.6 ms of CPU a frame, against 4-7 ms for the main thread and each of two workers, at 1.9 of the big
+        // cores' 3.2 GHz (Odin 2, 2026-10-30) - so the boost a late frame earned went to threads with nothing to do.
+        // Every 2 s: up to 3 game threads that used the most CPU (each over 15% of the time; one already in stays while
+        // it is among the 4 busiest, so the set doesn't flicker). Settings > Files > Measure and compare turns it on
+        // and off every 10 s (diag.c g_diag_ab).
+        if (slot == 0 && session[0] && s_presenting_tid > 0 && s_render_tid > 0) {
+            static int workers_env = -1, ncur, changes;
+            static uint64_t pick_at;
+            static int32_t cur[5];
+            if (workers_env < 0) { const char *e = getenv("LARECOMP_ADPF_WORKERS"); workers_env = !e || atoi(e) != 0; }
+            extern volatile int g_diag_ab;
+            extern int kernel_busiest_threads(int32_t *tids, int max, double min_share, int32_t skip);
+            bool want = g_diag_ab >= 0 ? g_diag_ab == 1 : workers_env;
+            uint64_t now = plat_now_ns();
+            if (now >= pick_at || (!want && ncur > 2)) {
+                pick_at = now + 2000000000ull;
+                int32_t w[4], tids[5] = {s_presenting_tid, s_render_tid};
+                int nw = kernel_busiest_threads(w, 4, 0.15, s_presenting_tid), n = 2;
+                if (want) {
+                    for (int i = 2; i < ncur; i++)  // (the ones in already, while still among the busiest)
+                        for (int j = 0; j < nw; j++) if (w[j] == cur[i]) { tids[n++] = cur[i]; w[j] = 0; break; }
+                    for (int j = 0; j < nw && n < 5; j++) if (w[j]) tids[n++] = w[j];
+                }
+                bool same = n == ncur;
+                for (int i = 0; same && i < n; i++) {
+                    bool in = false;
+                    for (int j = 0; j < ncur; j++) in |= cur[j] == tids[i];
+                    same = in;
+                }
+                if (!same) {
+                    int ok = set_threads && set_threads(session[0], tids, (size_t)n) == 0;
+                    if (!ok) {  // (API < 34: a new session with them)
+                        if (close_session) close_session(session[0]);
+                        session[0] = create(m, tids, (size_t)n, (int64_t)target[0]);
+                        s_recreated++;
+                        ok = session[0] != NULL;
+                    }
+                    if (ok) {
+                        memcpy(cur, tids, sizeof tids), ncur = n, s_session_threads = n;
+                        if (changes++ < 12)
+                            LOG("[android] performance hint session: %d threads (the presenting and render threads + %d of "
+                                "the game's busiest)\n", n, n - 2);
+                    } else {
+                        s_errors++;
+                        s_last_error = errno;
+                        ncur = 0;
+                    }
+                }
+            }
+        }
         if (slot != 0 || !session[0]) return;  // Render thread doesn't report separately in single-session mode
 
         if (target_ns != target[0]) {

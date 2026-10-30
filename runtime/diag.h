@@ -44,6 +44,7 @@ bool diag_want_gpu_ts(void);
 // When an image was really shown (VK_GOOGLE_display_timing: its presentID and actualPresentTime, CLOCK_MONOTONIC ns)
 void diag_displayed(uint32_t id, uint64_t actual_ns);
 void diag_gpu_composition(uint64_t ns);
+void diag_real_frame(void);  // (vulkan/device.c) a real frame presented (A/B: real frames a second)
 
 // Start a measurement of `seconds` of gameplay (it begins once the game is out of its menus for 5 s)
 void diag_request(int seconds);

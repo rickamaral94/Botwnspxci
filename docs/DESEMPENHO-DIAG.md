@@ -165,3 +165,40 @@ Odin 2 Portal, Turnip 27, 1.8.2, Sync lag desligado (com ele, o Link afunda):
     as alturas do terreno é reescrito pela CPU antes de a GPU usá-lo, também sem o lag.
   - A opção fica experimental e desligada.
 
+
+## ADPF com as threads do jogo (30/10)
+
+**O que os dados mostraram (Odin 2, framegen 2x, trecho pesado):** a sessão de dicas de desempenho tinha só a thread
+que apresenta e a de renderização.
+
+- A thread que apresenta usa ~0,6 ms de CPU por quadro: ela passa o tempo esperando.
+- Quem trabalha é a thread principal do jogo e duas threads de trabalho, com 4–7 ms cada. Elas ficavam fora da
+  sessão.
+- Os núcleos grandes rodavam a ~1,9 de 3,2 GHz.
+
+**Mudança** (`platform/android.c`, com o `kernel_busiest_threads` em `kernel.c`):
+
+- A cada 2 s entram na sessão até 3 threads do jogo que mais usaram CPU, cada uma com mais de 15% do tempo.
+- Para o conjunto não oscilar, uma thread que já está na sessão continua enquanto estiver entre as 4 mais ocupadas.
+- A meta e o trabalho reportado são os de antes. O SoC continua no modo padrão, e o Android só sobe o clock quando o
+  quadro passa da meta.
+- `LARECOMP_ADPF_WORKERS=0` desliga.
+
+**"Medir e comparar"** agora alterna isso a cada 10 s. O relatório mostra, para cada lado:
+
+- quadros reais por segundo;
+- a cadência na tela;
+- o intervalo entre presents;
+- a CPU das threads;
+- os MHz dos clusters, que dão o custo de bateria.
+
+Os constant buffers no lugar saíram da comparação: estão desligados por padrão e não voltam.
+
+**Saúde dos timestamps de GPU:** no último teste, o "GPU ocupada" somou só ~4 s em 60 s. A dinâmica e o diagnóstico
+dependem desse número, por isso o relatório agora conta as submissões:
+
+- lidas;
+- contidas no intervalo de outra;
+- não prontas;
+- invertidas;
+- nunca lidas (slot reutilizado antes).

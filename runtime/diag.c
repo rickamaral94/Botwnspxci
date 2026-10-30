@@ -256,7 +256,10 @@ void diag_pop_(void) {
 // ---------------------------------------------------------------- frames
 #define FMAX 16384
 static uint64_t f_interval[FMAX], f_acquire[FMAX], f_present[FMAX], f_gpu[FMAX], f_comp[FMAX];
-static uint64_t f_shown[FMAX], f_last_shown;  // (the intervals between images as the compositor showed them)
+static uint64_t f_shown[FMAX], f_last_shown;
+static uint8_t f_shown_flags[FMAX];
+static uint64_t g_ts0[6];  // (vulkan/exec.c diag_gpu_ts_health at the window's start)  // (1, and 4 with the compared feature on)
+static uint64_t ab_real[2], ab_ns[2], ab_t;  // (A/B: real frames and gameplay time with the feature off / on)  // (the intervals between images as the compositor showed them)
 static int f_nshown;
 static uint8_t f_flags[FMAX];  // 1 gameplay, 2 sampler on, 4 the compared feature on (diag_request_ab)
 static uint64_t f_rcpu[FMAX], f_mcpu[FMAX];  // the render thread's and the main thread's own CPU time per interval
@@ -294,6 +297,7 @@ void diag_request_ab(int seconds) {
 void diag_request(int seconds) {
     if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
     memset(ab_cl_sum, 0, sizeof ab_cl_sum), memset(ab_cl_samples, 0, sizeof ab_cl_samples);
+    memset(ab_real, 0, sizeof ab_real), memset(ab_ns, 0, sizeof ab_ns), ab_t = 0;
     g_seconds = seconds > 0 ? seconds : 60;
     atomic_store(&win_t0, ~0ull);
     atomic_store(&win_t1, ~0ull);
@@ -329,8 +333,16 @@ bool diag_want_gpu_ts(void) { return atomic_load_explicit(&g_state, memory_order
 void diag_displayed(uint32_t id, uint64_t t) {
     static uint32_t last_id;
     if (atomic_load(&g_state) != 2 || t <= f_last_shown) return;
-    if (f_last_shown && id == last_id + 1 && t - f_last_shown < 200000000ull && f_nshown < FMAX) f_shown[f_nshown++] = t - f_last_shown;
+    if (f_last_shown && id == last_id + 1 && t - f_last_shown < 200000000ull && f_nshown < FMAX)
+        f_shown_flags[f_nshown] = (uint8_t)(1 | (g_diag_ab == 1 ? 4 : 0)), f_shown[f_nshown++] = t - f_last_shown;
     f_last_shown = t, last_id = id;
+}
+// (vulkan/device.c) a real frame presented - with the frame generation, the generated ones aside
+void diag_real_frame(void) {
+    if (atomic_load(&g_state) != 2 || g_diag_ab < 0) return;
+    uint64_t now = now_fn();
+    if (ab_t && now - ab_t < 250000000ull && diag_in_gameplay()) ab_real[g_diag_ab]++, ab_ns[g_diag_ab] += now - ab_t;
+    ab_t = now;
 }
 void diag_gpu_composition(uint64_t ns) {
     if (atomic_load(&g_state) == 2 && f_ncomp < FMAX) f_comp[f_ncomp++] = ns;
@@ -362,6 +374,10 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         f_last_gpu = diag_gpu_busy_total_ns();
         atomic_store(&win_t1, now + (uint64_t)g_seconds * 1000000000ull);
         atomic_store(&win_t0, now);
+#ifdef __ANDROID__
+        { extern void diag_gpu_ts_health(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *);
+          diag_gpu_ts_health(&g_ts0[0], &g_ts0[1], &g_ts0[2], &g_ts0[3], &g_ts0[4], &g_ts0[5]); }
+#endif
         if (g_ab_want) g_diag_ab = 1, f_next_ab = now + 10000000000ull;
         f_last_rcpu = thread_cpu(), f_last_mcpu = tid_cpu(atomic_load(&g_main_tid));
         atomic_store(&g_state, 2);
@@ -672,9 +688,16 @@ static void *report_main(void *arg) {
     stat_line("acquire (vkAcquireNextImageKHR), gameplay", f_acquire, f_n, f_flags, 1, 1);
     stat_line("present call (vkQueuePresentKHR), gameplay", f_present, f_n, f_flags, 1, 1);
     if (g_ab_want) {
-        out("-- A/B: constant buffers read in place (on / off, alternating every 10 s; gameplay frames)");
-        stat_line("present interval, in place ON ", f_interval, f_n, f_flags, 5, 5);
-        stat_line("present interval, in place OFF", f_interval, f_n, f_flags, 5, 1);
+        out("-- A/B: the game's busiest threads in the ADPF session (on / off, alternating every 10 s; gameplay frames)");
+        for (int a = 1; a >= 0; a--)
+            if (ab_ns[a]) out("real frames a second with it %s: %.2f (%llu in %.1f s)", a ? "ON " : "OFF", ab_real[a] * 1e9 / ab_ns[a],
+                              (unsigned long long)ab_real[a], ab_ns[a] / 1e9);
+        if (f_nshown) {
+            stat_line("interval as the screen showed it, ON ", f_shown, f_nshown, f_shown_flags, 5, 5);
+            stat_line("interval as the screen showed it, OFF", f_shown, f_nshown, f_shown_flags, 5, 1);
+        }
+        stat_line("present interval, ON ", f_interval, f_n, f_flags, 5, 5);
+        stat_line("present interval, OFF", f_interval, f_n, f_flags, 5, 1);
         stat_line("render thread CPU per interval, ON ", f_rcpu, f_n, f_flags, 5, 5);
         stat_line("render thread CPU per interval, OFF", f_rcpu, f_n, f_flags, 5, 1);
         stat_line("main thread CPU per interval, ON ", f_mcpu, f_n, f_flags, 5, 5);
@@ -694,6 +717,17 @@ static void *report_main(void *arg) {
     // (the busy time arrives in batches, as submissions' timestamps are read back: the mean is the GPU's time per frame,
     // the percentiles are those of the batches)
     stat_line("GPU busy per present interval, gameplay (use the mean)", f_gpu, f_n, f_flags, 1, 1);
+#ifdef __ANDROID__
+    {   // (whether that time is whole: the submissions read in the window and those that added nothing)
+        extern void diag_gpu_ts_health(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *);
+        uint64_t h[6];
+        diag_gpu_ts_health(&h[0], &h[1], &h[2], &h[3], &h[4], &h[5]);
+        out("GPU timestamps read in the window: %llu counted, %llu inside an earlier one's span (%.1f ms of their own), %llu "
+            "not ready, %llu end before start, %llu never read",
+            (unsigned long long)(h[0] - g_ts0[0]), (unsigned long long)(h[2] - g_ts0[2]), (h[3] - g_ts0[3]) / 1e6,
+            (unsigned long long)(h[1] - g_ts0[1]), (unsigned long long)(h[4] - g_ts0[4]), (unsigned long long)(h[5] - g_ts0[5]));
+    }
+#endif
     stat_line("final composition (the game image into the window + the menus / overlay)", f_comp, f_ncomp, NULL, 0, 0);
     out("-- device (every 2 s)");
     if (cl_samples && cl_n) {

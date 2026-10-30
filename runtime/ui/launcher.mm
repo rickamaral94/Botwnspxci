@@ -1784,9 +1784,9 @@ static void prelaunch_tab(float sc) {
             ImGui::TextDisabled("%s", tr("In the next game session, records 60 s of gameplay once you have played 5 s out of "
                                          "the menus: where each frame's time goes (the game's threads, the GPU, the clocks). "
                                          "A line in the corner shows it. Play the same stretch as usual, then send the log. "
-                                         "Measure and compare: 120 s, the change being tested (now: the constant buffers read in "
-                                         "place, with Sync lag off) turned on and off every 10 s, so both share the clocks and "
-                                         "the heat."));
+                                         "Measure and compare: 120 s, the change being tested (now: the game's busiest threads in "
+                                         "Android's performance hints) turned on and off every 10 s, so both share the clocks "
+                                         "and the heat."));
         }
         ImGui::PopTextWrapPos();
         if (changed) settings_save();

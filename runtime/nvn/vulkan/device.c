@@ -1434,6 +1434,7 @@ void backend_present(NvnTexture *t) {
             last_dw = dw, last_dh = dh;
         }
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, vk_frame_gpu_ms(), &os);
+        diag_real_frame();
 #ifdef __ANDROID__
         static int matrix_trace = -1;
         static uint64_t matrix_last;

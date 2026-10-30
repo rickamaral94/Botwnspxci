@@ -175,6 +175,7 @@ static void note_gmem_store(int stage);  // (below: it reads the bound storage b
 // own slowness is the pacer's business (vk_pace_frame: busy time per presented frame). LARECOMP_COUNTER_IDLE=1: as
 // before.
 #define CQ_QUERIES (CQ_MAX + 2)
+static uint64_t gpu_ts_dropped, gpu_ts_ok, gpu_ts_unread, gpu_ts_covered, gpu_ts_backwards, gpu_ts_ns_lost;  // (diag.c: how much of it was read)
 static _Atomic uint64_t gpu_busy_total;  // (GPU ns working, all submissions so far: ADPF's GPU time per frame)
 static double g_pace_gpu_ms;  // (the last presented frame's GPU busy time: LARECOMP_LOG_PACE)
 #else
@@ -268,6 +269,13 @@ uint64_t diag_gpu_busy_total_ns(void) {
 #else
     return 0;
 #endif
+}
+
+// (diag.c) the submissions whose GPU times were read: counted, unread (not ready), wholly inside an earlier one's span
+// (and their own spans' sum), end before start, never read (the slot reused first)
+void diag_gpu_ts_health(uint64_t *ok, uint64_t *unread, uint64_t *covered, uint64_t *lost_ns, uint64_t *backwards,
+                        uint64_t *dropped) {
+    *dropped = gpu_ts_dropped, *ok = gpu_ts_ok, *unread = gpu_ts_unread, *covered = gpu_ts_covered, *lost_ns = gpu_ts_ns_lost, *backwards = gpu_ts_backwards;
 }
 
 double vk_frame_gpu_ms(void) {
@@ -537,9 +545,11 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
                 uint64_t ns = (uint64_t)(s1 - (s0 > last_end ? s0 : last_end > s1 ? s1 : last_end));
                 gpu_busy_total += ns;
                 vk_timing_trace_submission(ns, q->presentation);
-            }
+                if (ns) gpu_ts_ok++;
+                else gpu_ts_covered++, gpu_ts_ns_lost += (uint64_t)(s1 - s0);  // (inside an earlier one's span)
+            } else gpu_ts_backwards++;
             if (s1 > last_end) last_end = s1;
-        } else vk_timing_trace_query_failure(result, 0, q->seq);
+        } else gpu_ts_unread++, vk_timing_trace_query_failure(result, 0, q->seq);
     }
 #endif
     if (!q->n) return;
@@ -693,6 +703,7 @@ VkCommandBuffer vk_cmd(void) {
                 if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &q->pool) != VK_SUCCESS) q->pool = VK_NULL_HANDLE;
             }
             pthread_mutex_lock(&cq_lock);
+            if (q->ts) gpu_ts_dropped++, q->ts = false;  // (its times never read: the slot reused first)
             q->n = 0;  // (resolved when the slot was freed: sub())
             q->seq = s->seq;
             pthread_mutex_unlock(&cq_lock);
@@ -3822,18 +3833,16 @@ static bool gmem_placed;  // (gmem_buf is the guest heap itself, usable as a uni
 // allows - without it, as on the Switch, the GPU is done with a frame before the game writes the next. Every draw
 // decides (the lag can be turned on in play: frames already sent may read one frame early, once). Saves the render
 // thread its copies of them, on the critical path when the game waits for the GPU (docs/DESEMPENHO-DIAG.md).
-// LARECOMP_INPLACE_CBUF=0: never, 1: always (also with the lag); LARECOMP_AB=<frames>:inplace alternates it, and so
-// does Settings > Files > Measure and compare (diag.c g_diag_ab).
+// LARECOMP_INPLACE_CBUF=0: never, 1: always (also with the lag); LARECOMP_AB=<frames>:inplace alternates it.
 extern volatile bool g_sync_lag_now;  // (nvn/objects.c nvnSyncWait)
 static bool inplace_cbufs(void) {
     static int env = -2;
     if (env == -2) env = getenv("LARECOMP_INPLACE_CBUF") ? atoi(getenv("LARECOMP_INPLACE_CBUF")) : -1;
     int ab = AB("inplace");
-    // (the measurement's comparison, diag_request_ab, only where it would be on: never with the lag)
     // Off by default since 2026-10-30: with it on, Link's legs sank again on the Odin 2 Portal with the Sync lag off
     // (the terrain's heights for the feet come from GPU passes reading these buffers) - Video > Constant buffers read in
-    // place turns it on, to test; the measurement's comparison runs it either way.
-    bool on = env >= 0 ? env > 0 : ab >= 0 ? ab == 1 : !g_sync_lag_now && (g_diag_ab >= 0 ? g_diag_ab == 1 : g_settings.cbuf_inplace);
+    // place turns it on, to test. (The measurement's comparison compares the ADPF session now: platform/android.c.)
+    bool on = env >= 0 ? env > 0 : ab >= 0 ? ab == 1 : !g_sync_lag_now && g_settings.cbuf_inplace;
     static int last = -1;
     if (gmem_placed && (int)on != last) {
         LOG("[vk] constant buffers read in place: %s\n", on ? "on" : g_sync_lag_now ? "off (sync lag)" : "off");
