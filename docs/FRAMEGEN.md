@@ -418,4 +418,7 @@ Código:
   calculado por cima das imagens que faltavam. Agora só conta entre `presentID` consecutivos.
 - **Conclusão provisória:** com o SoC no modo padrão, o 2x (30 → 60 cravado) é o mais estável; o 4x mostra mais
   imagens, com a base abaixo de 30. Os dois ficam disponíveis.
+- **Escolha do usuário (30/10):** no Odin 2 Portal, com o SoC no modo padrão, o **2x** ficou melhor na tela que o 4x.
+  - Segue como padrão.
+  - 3x e 4x ficam como opção para quem tiver GPU com folga ou rodar com clocks mais altos.
 
