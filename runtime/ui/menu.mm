@@ -697,14 +697,19 @@ static void tab_display(void) {
         if (st == 1) {
             char why[256];
             int fs = fg_status(why, sizeof why);
-            std::string desc = tr("Shows a frame made by Lossless Scaling's frame generation between each two of the game's: the "
-                                  "game runs at 30 and 60 are shown. Input feels about one frame later, and the game's HUD is "
-                                  "interpolated too; the menus, events and movies show the real frames. Turning it on takes "
-                                  "effect when BOTWRecompAndroid starts again; off, at once.");
+            std::string desc = tr("Shows frames made by Lossless Scaling's frame generation between the game's own (the multiplier "
+                                  "below). Input feels about one frame later, and the game's HUD is interpolated too; the menus, "
+                                  "events and movies show the real frames. Turning it on takes effect when BOTWRecompAndroid "
+                                  "starts again; off, at once.");
             desc += "\n\n";
             desc += fs == 1 ? tr("On.") : fs == 2 ? tr("On when BOTWRecompAndroid starts again.") : fs == 3 ? tr("Unavailable: ") : tr("Off.");
-            if (fs == 3) desc += why;
-            opt_toggle("Frame generation 2x", &g_settings.framegen, false, desc.c_str());
+            if (fs == 3 || (fs == 1 && why[0])) desc += std::string(fs == 1 ? "\n" : "") + why;
+            opt_toggle("Frame generation", &g_settings.framegen, false, desc.c_str());
+            static const char *mults[] = {"2x (30 -> 60)", "3x (40 -> 120)", "4x (30 -> 120)"};
+            opt_choice("Frame generation multiplier", &g_settings.fg_mult, mults, 3, 0,
+                       "How many frames are shown for each of the game's. 2x: the game at 30, 60 shown. 3x and 4x need a "
+                       "120 Hz screen (the Odin 2 Portal's): the game at 40 or 30, 120 shown - each generated frame costs the "
+                       "GPU, input feels a little later. Where the screen can't, 2x. Applies at once.");
             static const char *flows[] = {"100%", "75%", "50%"};
             opt_choice("Frame generation flow scale", &g_settings.fg_flow, flows, 3, 2,
                        "The size at which the motion between two frames is estimated, a share of the screen's. Lower: the "

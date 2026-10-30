@@ -988,7 +988,9 @@ static void create_swapchain(void) {
     for (uint32_t i = 0; i < nf; i++)
         if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; break; }
     extern bool fg_wants_fifo(void);
-    uint32_t count = caps.minImageCount + 1 + (fg_wants_fifo() ? 1 : 0);  // (frame generation: two images queued per real frame)
+    extern int fg_queued_images(void);
+    // (frame generation: its images of a real frame queued at once - 2 to 4)
+    uint32_t count = caps.minImageCount + 1 + (fg_wants_fifo() ? (uint32_t)fg_queued_images() - 1 : 0);
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;  // (asked for: the driver may make more, up to VK_MAX_SWAP_IMAGES)
     if (count < caps.minImageCount) count = caps.minImageCount;
@@ -1110,6 +1112,24 @@ static Frame cur_frame;
 // nothing to draw into (minimised window).
 static uint64_t diag_acquire_ns, diag_present_ns;  // (diag.c: the last frame's, while measuring)
 void vk_diag_presented(void) { diag_present(diag_acquire_ns, diag_present_ns); }  // (vulkan/framegen.c: each image it shows)
+#ifdef __ANDROID__
+#include <android/native_window.h>
+#include <dlfcn.h>
+// (vulkan/framegen.c) the frame rate the window's content has, for Android to pick the screen's (0: none in particular)
+void vk_set_frame_rate(float hz) {
+    ANativeWindow *w = (ANativeWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, NULL);
+    if (!w) return;
+    static int32_t (*set_rate)(ANativeWindow *, float, int8_t);  // (libnativewindow, API 30: taken at run time)
+    if (!set_rate) {
+        void *lib = dlopen("libnativewindow.so", RTLD_NOW);
+        if (lib) set_rate = (int32_t (*)(ANativeWindow *, float, int8_t))dlsym(lib, "ANativeWindow_setFrameRate");
+        if (!set_rate) { LOG("[vk] ANativeWindow_setFrameRate unavailable\n"); return; }
+    }
+    int r = set_rate(w, hz, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+    LOG("[vk] frame rate asked of the window: %.0f Hz (%d)\n", hz, r);
+}
+#endif
+
 // A window with a swapchain of its size (made again when it changed), without acquiring an image
 static bool window_ready(void) {
     int w, h;

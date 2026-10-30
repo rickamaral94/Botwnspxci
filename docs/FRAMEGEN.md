@@ -388,3 +388,24 @@ Código:
   - 30 quadros reais por segundo no resto da janela, sem descartes.
   - **Impressão do usuário:** "até que está fluido".
 
+### 3x e 4x (30/10)
+
+- **Vídeo > Multiplicador da geração de quadros:**
+  - **2x** (30 → 60);
+  - **3x** (40 → 120);
+  - **4x** (30 → 120).
+- **Ritmo:** o `framepace` mantém o jogo na base do multiplicador. O framegen é criado com `generationCount = mult - 1`
+  e uma imagem de saída por quadro gerado. Os gerados entram na fila em ordem, um slot da grade de saída cada (1/120
+  s), e B entra no slot seguinte.
+- **120 Hz:**
+  - o app pede a taxa ao Android (`ANativeWindow_setFrameRate`, compatibilidade FIXED_SOURCE) e lê o que conseguiu no
+    ciclo de refresh da swapchain (`vkGetRefreshCycleDurationGOOGLE`, a cada segundo; `[fg] the screen refreshes at
+    ... Hz`);
+  - sem tempos de apresentação, ou com a tela abaixo da taxa, o app volta a 2x e o menu diz por quê;
+  - ao desligar a opção, o app deixa de pedir uma taxa.
+- **Swapchain:** com o FIFO, ganha `mult - 1` imagens a mais, e é recriada quando o multiplicador muda.
+- **Custo:** cada quadro gerado custa ~4 ms de GPU com escala do fluxo de 50%.
+  - No 3x, a base de 40 com 2 gerados (≈ 19 + 8 ms) tende a não caber em 25 ms no modo padrão do SoC.
+  - O 4x, com base de 30 e 3 gerados (≈ 19 + 12 ms), fica no limite dos 33 ms.
+  - A grade se ajusta, mas a medição no aparelho é o que decide.
+

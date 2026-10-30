@@ -42,7 +42,7 @@ static void record(void) {
 }
 
 #ifdef __ANDROID__
-extern "C" bool fg_overlay(float *real, float *shown);  // (nvn/vulkan/framegen.c)
+extern "C" bool fg_overlay(float *real, float *shown, int *mult);  // (nvn/vulkan/framegen.c)
 #endif
 
 void perf_overlay_draw(ImVec2 display, float scale) {
@@ -112,7 +112,8 @@ void perf_overlay_draw(ImVec2 display, float scale) {
 #ifdef __ANDROID__
     {   // the frame generation's real frames and shown ones (nvn/vulkan/framegen.c)
         float real, shown;
-        if (fg_overlay(&real, &shown)) ImGui::TextDisabled("framegen 2x: %.0f real / %.0f shown", real, shown);
+        int mult;
+        if (fg_overlay(&real, &shown, &mult)) ImGui::TextDisabled("framegen %dx: %.0f real / %.0f shown", mult, real, shown);
     }
 #endif
     ImGui::SameLine();

@@ -81,7 +81,8 @@ void fg_device_made(bool ok, const char *why) {
 
 // ------------------------------------------------------------------ resources
 typedef struct { VkImage img; VmaAllocation mem; VkImageView view; } Img;
-static Img fin[2], fout;
+static Img fin[2], fout[3];  // (the real frames' inputs; one output per generated frame)
+static int ctx_nout;
 static bool lib_on, ctx_on;
 static int32_t ctx_id;
 static VkExtent2D ctx_ext;
@@ -125,7 +126,8 @@ static void release(void) {
     char err[256];
     if (ctx_on && lsfgfg_delete(ctx_id, err, sizeof err)) LOG("[fg] %s\n", err);
     ctx_on = false;
-    img_free(&fin[0]), img_free(&fin[1]), img_free(&fout);
+    img_free(&fin[0]), img_free(&fin[1]);
+    for (int i = 0; i < 3; i++) img_free(&fout[i]);
     have_prev = false;
 }
 
@@ -144,12 +146,37 @@ static void fail(const char *why, int code) {
 }
 
 static const float flow_of[3] = {1.0f, 0.75f, 0.5f};
-static int lib_flow = -1, lib_perf = -1;  // (what the framegen was initialized with: a change makes it again, at once)
+static int lib_flow = -1, lib_perf = -1, lib_mult = -1;  // (what the framegen was made with: a change makes it again, at once)
+
+// The multipliers: 2x 30 -> 60, 3x 40 -> 120, 4x 30 -> 120 (Video > Frame generation multiplier). Above 60 shown it
+// takes presentation times and a screen that runs at 120 Hz: Android is asked for the rate (vk_set_frame_rate), and the
+// swapchain's refresh cycle (VK_GOOGLE_display_timing) says what it got; short of that, 2x, and the menu says why.
+static const struct { int mult, base, out; } modes[3] = {{2, 30, 60}, {3, 40, 120}, {4, 30, 120}};
+static uint64_t refresh_ns;   // the screen's refresh period as the swapchain reports it (0: unknown)
+static int rate_asked;        // the frame rate asked of the window (0: none)
+static char mode_note[160];   // why a multiplier above 2x isn't in effect
+
+static int mode_now(void) {
+    int m = g_settings.fg_mult >= 0 && g_settings.fg_mult <= 2 ? g_settings.fg_mult : 0;
+    mode_note[0] = 0;
+    if (modes[m].out <= 60) return m;
+    if (!g_vk.display_timing) {
+        snprintf(mode_note, sizeof mode_note, "%dx needs presentation times (VK_GOOGLE_display_timing): 2x", modes[m].mult);
+        return 0;
+    }
+    if (refresh_ns && refresh_ns > 1000000000ull / (uint64_t)modes[m].out * 11 / 10) {
+        snprintf(mode_note, sizeof mode_note, "%dx needs the screen at %d Hz; it runs at %.0f Hz: 2x", modes[m].mult, modes[m].out,
+                 1e9 / (double)refresh_ns);
+        return 0;
+    }
+    return m;
+}
 
 static bool ready(VkExtent2D e) {
     char err[512];
     int flow = g_settings.fg_flow >= 0 && g_settings.fg_flow <= 2 ? g_settings.fg_flow : 2, perf = g_settings.fg_performance;
-    if (lib_on && (flow != lib_flow || perf != lib_perf)) {
+    int mult = modes[mode_now()].mult;
+    if (lib_on && (flow != lib_flow || perf != lib_perf || mult != lib_mult)) {
         release();
         lsfgfg_finalize();
         lib_on = false;
@@ -160,20 +187,24 @@ static bool ready(VkExtent2D e) {
         vkGetPhysicalDeviceFormatProperties(g_vk.phys, FG_FORMAT, &fp);
         VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
         if ((fp.optimalTilingFeatures & need) != need) { fail("RGBA8 images can't be storage images on this driver", 0); return false; }
-        int r = lsfgfg_init(vkGetInstanceProcAddr, g_vk.inst, g_vk.phys, g_vk.dev, g_vk.qfam, g_vk.queue, flow_of[flow], 1, perf,
-                            fg_dir, err, sizeof err);
+        int r = lsfgfg_init(vkGetInstanceProcAddr, g_vk.inst, g_vk.phys, g_vk.dev, g_vk.qfam, g_vk.queue, flow_of[flow], mult - 1,
+                            perf, fg_dir, err, sizeof err);
         if (r) { fail(err, r); return false; }
         lib_on = true;
-        lib_flow = flow, lib_perf = perf;
+        lib_flow = flow, lib_perf = perf, lib_mult = mult;
         VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 16};
         if (!ts_pool && g_vk.props.limits.timestampComputeAndGraphics && vkCreateQueryPool(g_vk.dev, &qi, NULL, &ts_pool) != VK_SUCCESS)
             ts_pool = VK_NULL_HANDLE;
-        LOG("[fg] framegen ready (LSFG 3.1%s, 2x, flow scale %.2f)\n", perf ? "P, performance" : "", flow_of[flow]);
+        LOG("[fg] framegen ready (LSFG 3.1%s, %dx, flow scale %.2f)\n", perf ? "P, performance" : "", mult, flow_of[flow]);
     }
     if (ctx_on && (ctx_ext.width != e.width || ctx_ext.height != e.height)) release();
     if (!ctx_on) {
-        if (!img_make(&fin[0], e) || !img_make(&fin[1], e) || !img_make(&fout, e)) { fail("out of GPU memory for its images", 0); return false; }
-        int r = lsfgfg_create(fin[0].img, fin[1].img, &fout.img, 1, e.width, e.height, FG_FORMAT, &ctx_id, err, sizeof err);
+        bool ok = img_make(&fin[0], e) && img_make(&fin[1], e);
+        for (int i = 0; ok && i < mult - 1; i++) ok = img_make(&fout[i], e);
+        if (!ok) { fail("out of GPU memory for its images", 0); return false; }
+        VkImage outs[3] = {fout[0].img, fout[1].img, fout[2].img};
+        int r = lsfgfg_create(fin[0].img, fin[1].img, outs, mult - 1, e.width, e.height, FG_FORMAT, &ctx_id, err, sizeof err);
+        ctx_nout = mult - 1;
         if (r) { fail(err, r); return false; }
         ctx_on = true;
         ctx_ext = e;
@@ -191,14 +222,19 @@ bool fg_wants_fifo(void) { return g_vk.display_timing && fg_dev && !fg_failed &&
 
 bool fg_use_now(void) {
     {   // (turned on or off: the swapchain made again in the other present mode before the next image)
-        static int last = -1;
+        static int last = -1, last_mult = -1;
         int f = fg_wants_fifo();
-        if (last >= 0 && f != last) g_vk.sc_remake = true;
-        last = f;
+        if ((last >= 0 && f != last) || (f && last_mult >= 0 && g_settings.fg_mult != last_mult)) g_vk.sc_remake = true;
+        last = f, last_mult = g_settings.fg_mult;  // (and another multiplier: another number of images)
     }
     bool on = fg_dev && !fg_failed && g_settings.framegen;
     if (!on) {
-        if (ctx_on) release();  // (turned off in play: at once)
+        if (ctx_on) {
+            release();  // (turned off in play: at once)
+            extern void vk_set_frame_rate(float hz);
+            vk_set_frame_rate(0);
+            rate_asked = 0;
+        }
         return false;
     }
     bool unorm = g_vk.sc_format == VK_FORMAT_B8G8R8A8_UNORM || g_vk.sc_format == VK_FORMAT_R8G8B8A8_UNORM;
@@ -213,8 +249,11 @@ bool fg_use_now(void) {
     return true;
 }
 
-// (hle/framepace.c) the game's frame rate held at 30 while the frame generation is on: 60 shown
-bool fg_caps_base(void) { return fg_dev && !fg_failed && g_settings.framegen; }
+// (hle/framepace.c) the game's frame rate while the frame generation is on (the multiplier's base), else 0
+int fg_base_fps(void) { return fg_dev && !fg_failed && g_settings.framegen ? modes[mode_now()].base : 0; }
+
+// (device.c) the most images a real frame queues (the swapchain's extra images)
+int fg_queued_images(void) { return modes[g_settings.fg_mult >= 0 && g_settings.fg_mult <= 2 ? g_settings.fg_mult : 0].mult; }
 
 // (device.c) one of our images into the window, with the menus and the overlay over it; false: no window image now
 static bool show(VkImageView view) {
@@ -243,6 +282,26 @@ static void ts_write(VkCommandBuffer cb, uint32_t q) {
 // the caller presents it as usual.
 bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]) {
     VkExtent2D e = g_vk.sc_extent;
+    {   // the rate asked of Android (the multiplier's shown rate), and the refresh the swapchain reports, each second
+        static uint64_t next;
+        uint64_t t = plat_now_ns();
+        int want = modes[g_settings.fg_mult >= 0 && g_settings.fg_mult <= 2 ? g_settings.fg_mult : 0].out;
+        if (want != rate_asked) {
+            extern void vk_set_frame_rate(float hz);
+            vk_set_frame_rate((float)want);
+            rate_asked = want;
+            next = 0;
+        }
+        if (g_vk.display_timing && t >= next) {
+            next = t + 1000000000ull;
+            VkRefreshCycleDurationGOOGLE rc;
+            if (vkGetRefreshCycleDurationGOOGLE(g_vk.dev, g_vk.swapchain, &rc) == VK_SUCCESS && rc.refreshDuration) {
+                if (!refresh_ns || (refresh_ns > rc.refreshDuration ? refresh_ns - rc.refreshDuration : rc.refreshDuration - refresh_ns) > 500000)
+                    LOG("[fg] the screen refreshes at %.1f Hz\n", 1e9 / (double)rc.refreshDuration);
+                refresh_ns = rc.refreshDuration;
+            }
+        }
+    }
     if (!ready(e)) return false;
     uint64_t now = plat_now_ns();
     if (last_real_ns && now - last_real_ns > 100000000ull) have_prev = false;  // (a pause, a load: start over)
@@ -297,17 +356,19 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
         // the compositor holds each until its time, and the render thread goes straight on to the next frame. The grid
         // follows the real frames: a slot already past, or more than two periods ahead (the queue would grow), starts
         // it again from now.
-        enum { OUT_NS = 16666667 };
+        const uint64_t OUT_NS = 1000000000ull / (uint64_t)modes[mode_now()].out;
         period = OUT_NS;
         uint64_t t_i = now + 2000000ull;
         if (next_slot_ns > t_i && next_slot_ns - t_i < 2ull * OUT_NS) t_i = next_slot_ns;
         else if (next_slot_ns && next_slot_ns > t_i) st_drop++;  // (behind: the grid starts over, no image skipped)
         if (have_prev) {
             if (ts_pool) ts_write(vk_cmd(), tq + 1), ts_used[ts_i] = true;
-            g_vk.next_present_ns = t_i;
-            if (show(fout.view)) st_gen++;
-            g_vk.next_present_ns = t_i + OUT_NS;
-            next_slot_ns = t_i + 2ull * OUT_NS;
+            for (int i = 0; i < ctx_nout; i++) {  // (the generated frames in order, one slot each, then B)
+                g_vk.next_present_ns = t_i + (uint64_t)i * OUT_NS;
+                if (show(fout[i].view)) st_gen++;
+            }
+            g_vk.next_present_ns = t_i + (uint64_t)ctx_nout * OUT_NS;
+            next_slot_ns = t_i + (uint64_t)(ctx_nout + 1) * OUT_NS;
         } else {
             g_vk.next_present_ns = t_i;
             next_slot_ns = t_i + OUT_NS;
@@ -320,7 +381,7 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
         if (have_prev && !gen) st_drop++;
         if (gen) {
             if (ts_pool) ts_write(vk_cmd(), tq + 1), ts_used[ts_i] = true;
-            if (show(fout.view)) st_gen++;
+            if (show(fout[0].view)) st_gen++;
             plat_sleep_until_ns(last_shown_ns + period);
         }
     }
@@ -351,8 +412,9 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
 }
 
 // (ui/perf_overlay.mm) real and shown frames a second, while it runs; false: not running
-bool fg_overlay(float *real, float *shown) {
+bool fg_overlay(float *real, float *shown, int *mult) {
     if (!ctx_on || fg_failed) return false;
+    *mult = ctx_nout + 1;
     *real = ov_real, *shown = ov_shown;
     return true;
 }
@@ -362,7 +424,11 @@ int fg_status(char *why, size_t n) {
     snprintf(why, n, "%s", fg_why);
     if (fg_failed) return 3;
     if (!g_settings.framegen) return 0;
-    if (fg_dev) return 1;
+    if (fg_dev) {
+        mode_now();
+        snprintf(why, n, "%s", mode_note);  // (a multiplier above 2x the screen or the platform can't give)
+        return 1;
+    }
     return fg_why[0] && strcmp(fg_why, "no Lossless.dll shaders") ? 3 : 2;
 }
 #endif

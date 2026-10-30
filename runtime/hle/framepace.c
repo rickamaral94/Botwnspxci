@@ -113,9 +113,10 @@ int framepace_target(void) {
     // (Video > Frame rate: 30, 60; Auto is 60 here - the clock follows whatever the frames really take)
     int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 : 60;
 #ifdef __ANDROID__
-    {   // Video > Frame generation 2x: the game at 30, a generated frame between each two (nvn/vulkan/framegen.c)
-        extern bool fg_caps_base(void);
-        if (fg_caps_base() && (fps == 0 || fps > 30)) fps = 30;
+    {   // Video > Frame generation: the game at the multiplier's base (30 or 40), generated frames between (nvn/vulkan/framegen.c)
+        extern int fg_base_fps(void);
+        int base = fg_base_fps();
+        if (base > 0 && (fps == 0 || fps > base)) fps = base;
     }
 #endif
     if (movie > 0 && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0 && (fps == 0 || fps > movie)) fps = movie;
