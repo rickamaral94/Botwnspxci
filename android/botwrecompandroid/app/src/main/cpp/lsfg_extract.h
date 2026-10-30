@@ -62,6 +62,9 @@ int lsfg_import_fd(int fd, char *detail, size_t n);  // lsfg::Result
 int lsfg_state(char *line, size_t n);                // 0 none, 1 installed, 2 importing
 void lsfg_remove(void);
 void lsfg_startup(void);
+// (the frame generation, vulkan/framegen.c) the installed shaders' folder and their capabilities, space-separated:
+// 1 when a complete set is installed
+int lsfg_installed_set(char *dir, size_t ndir, char *caps, size_t ncaps);
 
 #ifdef __cplusplus
 }

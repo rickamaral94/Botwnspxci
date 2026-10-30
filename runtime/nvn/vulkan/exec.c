@@ -7185,7 +7185,21 @@ static void scene_upscale(Prog *pr, CmdRec *r) {
 void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]) {
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
     VkImageView src = post_process(cb, b, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh);
-    VkPipeline p = present_pipeline(g_vk.sc_format);
+    vk_present_draw_view(cb, src, g_vk.sc_format, g_vk.sc_extent, vx, vy, vw, vh, pv);
+}
+
+// The same in two steps, for a target other than the window image (vulkan/framegen.c): the game image after its post
+// passes (anti-aliasing, upscaling: each its own pass - so outside any rendering, where vk_frame_suspend / _resume do
+// nothing), then drawn into the rendering begun on a target of format fmt and size full
+VkImageView vk_present_source(VkCommandBuffer cb, TexBackend *b, float vw, float vh, const float pv[8]) {
+    if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return VK_NULL_HANDLE;
+    return post_process(cb, b, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh);
+}
+
+void vk_present_draw_view(VkCommandBuffer cb, VkImageView src, VkFormat fmt, VkExtent2D full, float vx, float vy, float vw, float vh,
+                          const float pv[8]) {
+    if (!src) return;
+    VkPipeline p = present_pipeline(fmt);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
     VkDescriptorImageInfo ii = {vk_default_sampler(true), src, VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
@@ -7198,8 +7212,8 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
     ss.known &= ~SS_SETS;  // (another layout: the draws' sets are bound again)
     vkCmdDraw(cb, 3, 1, 0, 0);
-    VkViewport full = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
-    vkCmdSetViewport(cb, 0, 1, &full);
+    VkViewport whole = {0, 0, (float)full.width, (float)full.height, 0, 1};
+    vkCmdSetViewport(cb, 0, 1, &whole);
 }
 
 // Screenshot of a game texture (presented crop applied to build/frame_* shots), via the present shader into RGBA8.

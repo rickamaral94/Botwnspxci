@@ -112,6 +112,12 @@ int framepace_target(void) {
     if (event == -2) event = env_int("LARECOMP_EVENT_FPS", -1);  // (-1: the setting - Cutscenes at 60 fps, else 30)
     // (Video > Frame rate: 30, 60; Auto is 60 here - the clock follows whatever the frames really take)
     int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 : 60;
+#ifdef __ANDROID__
+    {   // Video > Frame generation 2x: the game at 30, a generated frame between each two (nvn/vulkan/framegen.c)
+        extern bool fg_caps_base(void);
+        if (fg_caps_base() && (fps == 0 || fps > 30)) fps = 30;
+    }
+#endif
     if (movie > 0 && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0 && (fps == 0 || fps > movie)) fps = movie;
     if (menu > 0 && (fps == 0 || fps > menu) && in_menu()) fps = menu;
     int ev = event >= 0 ? event : g_settings.event_fps_unlock ? 0 : 30;

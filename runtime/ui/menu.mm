@@ -16,6 +16,7 @@
 #ifdef __ANDROID__
 #include "lsfg_extract.h"  // (android/botwrecompandroid/app/src/main/cpp)
 extern "C" void launcher_pick_lossless_dll(void);  // (launcher.mm)
+extern "C" int fg_status(char *why, size_t n);       // (nvn/vulkan/framegen.c)
 #endif
 #include "i18n.h"
 #include "imgui.h"
@@ -688,6 +689,18 @@ static void tab_display(void) {
                        "Scaling. The frame generation itself isn't in this version yet.",
                        false) && st != 2) {
             launcher_pick_lossless_dll();
+        }
+        if (st == 1) {
+            char why[256];
+            int fs = fg_status(why, sizeof why);
+            std::string desc = tr("Shows a frame made by Lossless Scaling's frame generation between each two of the game's: the "
+                                  "game runs at 30 and 60 are shown. Input feels about one frame later, and the game's HUD is "
+                                  "interpolated too; the menus, events and movies show the real frames. Turning it on takes "
+                                  "effect when BOTWRecompAndroid starts again; off, at once.");
+            desc += "\n\n";
+            desc += fs == 1 ? tr("On.") : fs == 2 ? tr("On when BOTWRecompAndroid starts again.") : fs == 3 ? tr("Unavailable: ") : tr("Off.");
+            if (fs == 3) desc += why;
+            opt_toggle("Frame generation 2x", &g_settings.framegen, false, desc.c_str());
         }
         if (st == 1 && opt_button("Remove shaders", "Deletes the shaders translated from your Lossless.dll."))
             lsfg_remove();

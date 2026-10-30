@@ -691,3 +691,17 @@
  "Apaga os shaders traduzidos do seu Lossless.dll."},
 {"Measure and compare (120 s)",
  "Medir e comparar (120 s)"},
+// Frame generation 2x (menu.mm, nvn/vulkan/framegen.c)
+{"Frame generation 2x",
+ "Geração de quadros 2x"},
+{"Shows a frame made by Lossless Scaling's frame generation between each two of the game's: the game runs at 30 and 60 are shown. Input feels about one frame later, and the game's HUD is interpolated too; the menus, events and movies show the real frames. Turning it on takes effect when BOTWRecompAndroid starts again; off, at once.",
+ "Mostra um quadro feito pela geração de quadros do Lossless Scaling entre cada dois do jogo: o jogo roda a 30 e 60 são mostrados. Os comandos respondem cerca de um quadro depois, e o HUD do jogo também é interpolado; menus, eventos e filmes mostram os quadros reais. Ligar vale quando o BOTWRecompAndroid abrir de novo; desligar, na hora."},
+{"On.",
+ "Ligada."},
+{"On when BOTWRecompAndroid starts again.",
+ "Liga quando o BOTWRecompAndroid abrir de novo."},
+{"Unavailable: ",
+ "Indisponível: "},
+{"Off.",
+ "Desligada."},
+

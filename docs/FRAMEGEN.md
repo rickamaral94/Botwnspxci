@@ -3,7 +3,7 @@
 Estado (30/10/2026):
 - **B0** (licenças e contrato da API): feita.
 - **B1** (extração dos shaders): feita. Falta o teste com o seu DLL no aparelho.
-- **B2** (integração no present): só especificada. O código começa depois da revisão desta especificação.
+- **B2** (integração no present): primeira versão feita (2x, 30 → 60), falta o teste no Odin 2 Portal.
 
 Este projeto não inclui, não baixa e não redistribui o `Lossless.dll`, os shaders dele ou o SPIR-V traduzido deles.
 O usuário escolhe o próprio DLL, comprado no Steam (Lossless Scaling, app 993090).
@@ -290,3 +290,58 @@ Notação: `R(n)` são os quadros reais; `I(n-1,n)` é o intermediário entre `R
   ou gerada. Nunca é interpolado.
 - O HUD do próprio jogo está na imagem do jogo, então **é interpolado**. É uma limitação conhecida da primeira
   versão. Uma melhoria futura é a máscara por diferença com a cópia de antes do HUD (`FRAMEGEN-AVALIACAO.md`).
+
+## B2 — implementação (30/10/2026)
+
+Código:
+- `runtime/nvn/vulkan/framegen.c`: o caminho do present;
+- `android/.../cpp/lsfg_framegen_c.{h,cpp}`: a interface C do framegen, em `liblsfg_framegen.so`;
+- `device.c`: as features e o desvio em `vk_present_now`;
+- `exec.c`: o `vk_present_draw` em dois passos;
+- `hle/framepace.c`: base 30;
+- `menu.mm` e `perf_overlay.mm`.
+
+### Isolamento
+
+- O `liblsfg_framegen.so` tem o volk próprio e só exporta `lsfgfg_*`: há version script, visibilidade oculta e
+  `-Bsymbolic`. Conferido com `llvm-nm`: nenhum `vk*` ou `volk*` importado ou exportado.
+- Nenhuma exceção C++ sai dessa interface.
+
+### Device
+
+- Com **Vídeo > Geração de quadros 2x** ligada e os shaders instalados no início do app, o device é criado com:
+  - `vulkanMemoryModel`, mais `DeviceScope` se o driver tiver;
+  - `shaderStorageImageWriteWithoutFormat`, mais `ReadWithoutFormat` se o driver tiver;
+  - `shaderStorageImageExtendedFormats`.
+- Capability desconhecida no MANIFEST, ou feature ausente, deixam a opção indisponível, com o motivo no menu.
+- Com a opção desligada, a criação do device é a mesma de antes.
+
+### Diferenças em relação à especificação
+
+- **Um conjunto de saída, não dois.**
+  - O quadro I é lido, e a janela recebe a imagem, antes de o próximo `presentContext` ser submetido na mesma fila.
+  - Barreiras de memória completas no início de cada command buffer nosso ordenam as leituras e as escritas: as do
+    framegen depois das nossas, e as nossas depois das dele.
+- **Ritmo por espera, não pela FIFO.**
+  - A swapchain é MAILBOX (`present_mode`): duas apresentações seguidas fariam a segunda substituir a primeira.
+  - Então I vai à janela assim que fica pronto, a thread de render espera um período P (metade do intervalo medido
+    entre quadros reais, entre 6 e 25 ms), e só então vai B.
+  - I é descartado se a última imagem mostrada for de menos de P/2 atrás.
+- **Desenho em vez de cópia.** A swapchain não tem `TRANSFER_DST` (`vk_backend_swapchain_usage`), então as imagens
+  do framegen vão para a janela pelo pipeline do present.
+
+### Formato
+
+- `R8G8B8A8_UNORM`: storage, sampled e color attachment, conferidos no driver.
+- A janela precisa ser UNORM (B8G8R8A8 ou R8G8B8A8): os bytes passam sem conversão de gama. Se não for, a opção fica
+  indisponível.
+
+### Medições
+
+- `[fg]` a cada 2 s, durante a medição de desempenho ou com `LARECOMP_FG_LOG=1`:
+  - quadros reais, gerados e descartados;
+  - tempo de GPU do framegen, por timestamps antes e depois do trabalho dele na fila;
+  - período de saída.
+- O "Medir desempenho" conta cada imagem apresentada; o intervalo entre presents deve ficar perto de 16,7 ms.
+- O overlay mostra "framegen 2x: X real / Y shown".
+

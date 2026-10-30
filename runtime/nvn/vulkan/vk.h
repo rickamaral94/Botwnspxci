@@ -49,6 +49,7 @@ typedef struct {
     bool custom_border, divisor, host_import, shader_int64;
     bool dyn_render;              // VK_KHR_dynamic_rendering in use; without it, classic render passes (rpcompat.c)
     bool sync2;                   // synchronization2 in use; without it, Vulkan 1.0 barriers (device.c sync1_*)
+    bool framegen;                // made with the frame generation's features (vulkan/framegen.c): Video > Frame generation
     bool eds;                     // extended dynamic state in use; without it, those states (and extended dynamic state
                                   // 2's) baked into pipelines (exec.c PipeKey.fx)
     bool eds2;                    // extended dynamic state 2 in use; without it, depth bias and primitive restart are
@@ -127,6 +128,10 @@ typedef struct TexBackend {
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
 } TexBackend;
+// (exec.c) the presented image in two steps, for a target that isn't the window image (vulkan/framegen.c)
+VkImageView vk_present_source(VkCommandBuffer cb, TexBackend *b, float vw, float vh, const float pv[8]);
+void vk_present_draw_view(VkCommandBuffer cb, VkImageView src, VkFormat fmt, VkExtent2D full, float vx, float vy, float vw, float vh,
+                          const float pv[8]);
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)
 VkFormat vk_format(uint32_t nvn_format);

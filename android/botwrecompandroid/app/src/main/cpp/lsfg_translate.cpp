@@ -119,6 +119,17 @@ extern "C" int lsfg_state(char *line, size_t n) {
     return 0;
 }
 
+extern "C" int lsfg_installed_set(char *dir, size_t ndir, char *caps, size_t ncaps) {
+    std::string r = root_dir();
+    std::vector<std::string> c;
+    if (r.empty() || !lsfg::installed(r, nullptr, &c)) return 0;
+    snprintf(dir, ndir, "%s/lsfg/spirv", r.c_str());
+    std::string s;
+    for (auto &x : c) s += (s.empty() ? "" : " ") + x;
+    snprintf(caps, ncaps, "%s", s.c_str());
+    return 1;
+}
+
 extern "C" void lsfg_remove(void) {
     std::string r = root_dir();
     if (!r.empty()) lsfg::remove_all(r);

@@ -798,6 +798,35 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, .pipelineExecutableInfo = VK_TRUE};
     if (g_vk.exec_stats) { pex.pNext = f.pNext; f.pNext = &pex; }
 #endif
+#ifdef __ANDROID__
+    {   // Frame generation (vulkan/framegen.c, docs/FRAMEGEN.md): only with Video > Frame generation on and the
+        // Lossless.dll's shaders installed, the features their capabilities need (lsfg_extract's MANIFEST); otherwise
+        // the device is made exactly as without it
+        extern bool fg_device_wanted(void), fg_cap(const char *name);
+        extern void fg_device_made(bool ok, const char *why);
+        g_vk.framegen = false;
+        if (fg_device_wanted()) {
+            VkPhysicalDeviceVulkan12Features m12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+            VkPhysicalDeviceFeatures2 m = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &m12};
+            if (g_vk.api >= VK_API_VERSION_1_2) vkGetPhysicalDeviceFeatures2(g_vk.phys, &m);
+            const char *no = g_vk.api < VK_API_VERSION_1_3 ? "the driver is below Vulkan 1.3 (the shaders are SPIR-V 1.6)"
+                           : !m12.vulkanMemoryModel ? "the driver has no vulkanMemoryModel"
+                           : fg_cap("VulkanMemoryModelDeviceScope") && !m12.vulkanMemoryModelDeviceScope ? "the driver has no vulkanMemoryModelDeviceScope"
+                           : !h->shaderStorageImageWriteWithoutFormat ? "the driver has no shaderStorageImageWriteWithoutFormat"
+                           : fg_cap("StorageImageReadWithoutFormat") && !h->shaderStorageImageReadWithoutFormat ? "the driver has no shaderStorageImageReadWithoutFormat"
+                           : !h->shaderStorageImageExtendedFormats ? "the driver has no shaderStorageImageExtendedFormats" : NULL;
+            if (!no) {
+                f12.vulkanMemoryModel = VK_TRUE;
+                f12.vulkanMemoryModelDeviceScope = m12.vulkanMemoryModelDeviceScope;
+                b->shaderStorageImageWriteWithoutFormat = VK_TRUE;
+                b->shaderStorageImageReadWithoutFormat = h->shaderStorageImageReadWithoutFormat;
+                b->shaderStorageImageExtendedFormats = VK_TRUE;
+                g_vk.framegen = true;
+            }
+            fg_device_made(!no, no);
+        }
+    }
+#endif
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
                                   .queueCount = 1, .pQueuePriorities = &prio};
@@ -1062,8 +1091,9 @@ static Frame cur_frame;
 // Acquire the next window image and begin rendering into it (cleared to `clear`). Returns false when there is
 // nothing to draw into (minimised window).
 static uint64_t diag_acquire_ns, diag_present_ns;  // (diag.c: the last frame's, while measuring)
-bool vk_frame_begin(const float clear[4]) {
-    cur_frame.ok = false;
+void vk_diag_presented(void) { diag_present(diag_acquire_ns, diag_present_ns); }  // (vulkan/framegen.c: each image it shows)
+// A window with a swapchain of its size (made again when it changed), without acquiring an image
+static bool window_ready(void) {
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     if (!w || !h) return false;  // minimised
@@ -1071,10 +1101,15 @@ bool vk_frame_begin(const float clear[4]) {
     if (!android_surface_ready()) return false;
 #endif
     if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
-    if (!g_vk.swapchain) return false;
+    return g_vk.swapchain != VK_NULL_HANDLE;
+}
+
+bool vk_frame_begin(const float clear[4]) {
+    cur_frame.ok = false;
+    if (!window_ready()) return false;
     static int trace = -1;
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
-    if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
+    if (trace) LOG("[vk] frame begin (swapchain %ux%u)\n", g_vk.sc_extent.width, g_vk.sc_extent.height);
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
 #ifdef __ANDROID__
@@ -1316,7 +1351,13 @@ void backend_present(NvnTexture *t) {
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool diag_ts = diag_want_gpu_ts() && diag_ts_reset();
-    bool have = vk_frame_begin(black);
+#ifdef __ANDROID__
+    extern bool fg_use_now(void);  // (vulkan/framegen.c: Video > Frame generation, in play)
+    bool fg = fg_use_now() && window_ready();
+#else
+    bool fg = false;
+#endif
+    bool have = fg || vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
     if (nd > 30000000) {
         static int warned;
@@ -1368,6 +1409,14 @@ void backend_present(NvnTexture *t) {
         float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
         memcpy(g_shot_crop, crop, sizeof crop);
         extern void vk_gp_note(VkCommandBuffer cb, const char *what);  // (LARECOMP_GPUPROF_AT: the present's own rows)
+#ifdef __ANDROID__
+        if (fg) {  // (the frame generation presents it - and the frame made before it - itself)
+            extern bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]);
+            if (fg_frame(b, (float)vx, (float)vy, (float)vw, (float)vh, pv)) goto presented;
+            if (!vk_frame_begin(black)) { renderer_submit(); goto presented; }  // (it stopped: this frame as usual)
+            cb = vk_cmd();
+        }
+#endif
         vk_gp_note(cb, "present: the image into the window");
         if (diag_ts) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, diag_qp, diag_qi * 2);
         vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
@@ -1386,6 +1435,9 @@ void backend_present(NvnTexture *t) {
     } else {
         renderer_submit();
     }
+#ifdef __ANDROID__
+presented:;
+#endif
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
     vk_prof_frame(total_frames, SDL_GetTicksNS() - t0);
     frames++;
