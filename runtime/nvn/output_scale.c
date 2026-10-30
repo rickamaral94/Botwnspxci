@@ -28,11 +28,29 @@ static double g_dyn_gpu_sum, g_dyn_dt_sum, g_last_t;
 static int g_dyn_n, g_dyn_gpu_n, g_dyn_good;
 static double g_dyn_cool_until, g_dyn_probe_wait = 5.0, g_dyn_probe_at;
 static double g_dyn_last_raise = -100;
+#ifdef __ANDROID__
+// The GPU's time per frame over the whole window: its busy total (vulkan/exec.c) at the window's start and end over
+// the frames in it. The per-frame value comes in bursts (a submission's timestamps are read when its ring slot is
+// reused): frames that read 0 were left out of the average, which doubled it - 23 ms "a frame" where the GPU worked
+// ~13 (Odin 2, 2026-10-30) - and windows that read only 0s had no GPU time at all; the scale fell to its floor in a
+// scene the CPU held, the image softer for nothing
+extern uint64_t diag_gpu_busy_total_ns(void);
+static uint64_t g_dyn_gpu_t0;
+#endif
+
+static void dyn_window_start(void) {
+    g_dyn_dt_sum = g_dyn_gpu_sum = 0;
+    g_dyn_n = g_dyn_gpu_n = 0;
+#ifdef __ANDROID__
+    g_dyn_gpu_t0 = diag_gpu_busy_total_ns();
+#endif
+}
 
 static void dyn_update(double now, double gpu_ms) {
-    double dt = g_last_t > 0 ? (now - g_last_t) * 1000.0 : 16.7;
+    if (g_last_t <= 0) { g_last_t = now; dyn_window_start(); return; }
+    double dt = (now - g_last_t) * 1000.0;
     g_last_t = now;
-    if (dt > 250) return;  // (loading, menus, a stall: not the GPU's steady state)
+    if (dt > 250) { dyn_window_start(); return; }  // (loading, menus, a stall: not the GPU's steady state)
     double want = framepace_on() && framepace_target() > 0 ? 1000.0 / framepace_target() : 1000.0 / 30;  // (ms a frame)
 #ifdef __ANDROID__
     // the frame rate it keeps: 60 with Frame rate at 60 fps, else 30 - Auto's 60 comes by itself where the GPU has room.
@@ -44,8 +62,16 @@ static void dyn_update(double now, double gpu_ms) {
     if (gpu_ms >= 0) { g_dyn_gpu_sum += gpu_ms; g_dyn_gpu_n++; }
     if (g_dyn_n < 30) return;  // decide every ~half second
     double avg_dt = g_dyn_dt_sum / g_dyn_n, avg_gpu = g_dyn_gpu_n ? g_dyn_gpu_sum / g_dyn_gpu_n : -1;
-    g_dyn_dt_sum = g_dyn_gpu_sum = 0;
-    g_dyn_n = g_dyn_gpu_n = 0;
+#ifdef __ANDROID__
+    {
+        uint64_t total = diag_gpu_busy_total_ns();
+        bool measured = total > 0;  // (no GPU timestamps on this device: the frame time alone, below)
+        avg_gpu = total > g_dyn_gpu_t0 ? (double)(total - g_dyn_gpu_t0) / 1e6 / g_dyn_n : -1;
+        (void)gpu_ms;
+        if (measured && avg_gpu < 0) { dyn_window_start(); return; }  // (no submission read back yet: decide next time)
+    }
+#endif
+    dyn_window_start();
     if (now < g_dyn_cool_until) return;
     double prev = g_dyn;
     // The GPU's share of the frame: with the frame generation on, its own work (not in gpu_ms: it submits apart) comes

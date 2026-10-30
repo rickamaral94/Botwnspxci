@@ -438,3 +438,23 @@ Agora o orçamento de GPU do quadro real desconta o custo do framegen:
 - O limiar "lento" e o de "folga" passam a usar `want_gpu`.
 - Com o framegen desligado, o custo é 0, e o comportamento fica igual ao de antes.
 - A linha `[dynres]` mostra `gpu X ms of Y`, onde Y é esse orçamento.
+
+**Resultado no Odin 2 (30/10, 2x, Dinâmica):**
+
+- A cadência na tela melhorou: o p95 caiu de 33 para 25 ms, o p50 ficou em 16,73 e o p99 em 33,5 ms.
+- A escala, porém, desceu até 0,55 sem ganho real: os quadros continuaram em ~36 ms no trecho pesado.
+
+**Por que a escala desceu sem ganho:** o tempo de GPU por quadro que a dinâmica usava chega em lotes, porque os
+timestamps só são lidos quando o slot da submissão é reutilizado. Os quadros que liam 0 ficavam fora da média, e
+isso a dobrava: ~23 ms, contra ~13 ms medidos pelo diagnóstico, que somam ~17 ms com os 4,5 ms do framegen. As
+janelas só com zeros caíam no critério de "só tempo de quadro" e baixavam a escala mesmo assim.
+
+**Correção:** a GPU agora é medida pela janela inteira (o total ocupado no início e no fim, dividido pelos quadros).
+Uma janela sem leitura nenhuma não decide nada.
+
+**Conclusão:** o trecho pesado é limitado pela CPU, e não pela GPU.
+
+- A thread principal espera 9 ms por quadro em `ArbitrateLock`/`WaitForAddress`, aguardando as threads de trabalho
+  do jogo.
+- O cluster principal fica em média a 1,9 GHz de 3,2 GHz no modo padrão do SoC.
+- Baixar a resolução não ajuda nesse caso.
