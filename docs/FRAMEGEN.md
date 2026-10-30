@@ -381,4 +381,10 @@ Código:
 - **O intervalo que o diagnóstico mostrava era entre as chamadas de present,** não entre o que a tela exibiu. Agora,
   com `VK_GOOGLE_display_timing`, o relatório também lê do compositor os tempos reais (`actualPresentTime`), na linha
   "interval between images as the screen showed them": o critério de cadência da especificação.
+- **Cadência real** (60 s, o compositor via `actualPresentTime`): **p50 16,72 ms**, média 17,4, p95 33,4, p99 41,8.
+  - A mediana está no alvo de 60 Hz.
+  - Os ~5% de intervalos de 33 ms são imagens que perderam o slot e ficaram dois vsyncs na tela. Acontecem sobretudo
+    no trecho mais pesado, onde os quadros reais caem para ~28,5 por segundo.
+  - 30 quadros reais por segundo no resto da janela, sem descartes.
+  - **Impressão do usuário:** "até que está fluido".
 
