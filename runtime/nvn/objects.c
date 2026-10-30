@@ -276,6 +276,7 @@ NVN(nvnSyncInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnSync))); RET(1); }
 NVN(nvnSyncFinalize) { free(HOST(NvnSync, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnSyncSetDebugLabel) { (void)c; }
 void renderer_flush(void);
+volatile bool g_sync_lag_now;  // (the last frame's wait was one frame back: the CPU may run a frame ahead of the GPU)
 NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     static int flush = -1;
     static uint64_t n;
@@ -335,6 +336,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     extern int vk_ab(const char *what);
     int ab = vk_ab("synclag");
     bool lag_now = vk_async_on() && !flush && !whole && (ab >= 0 ? ab == 1 : lag > 0);
+    g_sync_lag_now = lag_now;  // (vulkan/exec.c: constant buffers read in place only without the lag)
     static uint64_t prev_newest_seq;  // (kept with the lag off too: turned on, it waits one frame back, not more)
     bool newest = vk_async_on() && sync_of(A(0))->lseq == g_newest_fence_lseq;
     uint64_t newest_prev = prev_newest_seq;

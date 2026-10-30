@@ -102,3 +102,35 @@ Amostradas: a thread principal, a que apresenta, a de render e as listadas em `L
   - o fluxo inteiro do relatório.
 - **No aparelho:** o relatório precisa mostrar as categorias somando a janela, as amostras perdidas e o custo do
   amostrador (ligado vs desligado).
+
+## Fase C, item 1: constant buffers lidos no lugar sem o Sync lag (30/10/2026)
+
+### O que a medição mostrou
+
+Odin 2 Portal, Turnip 27, 1.8.2, Sync lag desligado (com ele, o Link afunda):
+- **Quadro:** p50 22,1 ms. Com o Sync lag ligado eram 18,9 ms.
+- **Thread principal:** espera **7,3 ms por quadro** pela GPU. A GPU fica ocupada só ~6,6 ms; o resto da espera é a
+  tradução na thread de render, ~9,7 ms por quadro.
+- **Thread de render:** ~16% das amostras estão nas cópias dos constant buffers (`guest_copy` / `ubo_span` chamando o
+  memcpy da libc).
+
+### O que mudou
+
+- **Ligado sozinho:** quando o jogo espera a GPU a cada quadro (o Sync lag fora de efeito) e o heap está na memória
+  da GPU (Turnip), os constant buffers são lidos no lugar. Isso vale para o `ubo_direct` e para a janela por draw
+  (`cbwin_bind`). As duas coisas já existiam e estavam desligadas por padrão.
+- **Por que estavam desligadas:** os artefatos (água branca, "cortinas" no terreno, pontas em objetos ao longe) foram
+  atribuídos à CPU escrevendo o quadro seguinte enquanto a GPU ainda lia este. Só o Sync lag deixa isso acontecer.
+- **Decisão por draw:** ligar o Sync lag em jogo volta às cópias.
+- **Tradução dos shaders:** passa a incluir o teste da janela sempre que o heap está na GPU. O cache de SPIR-V é
+  indexado pelo fonte, então os shaders são compilados de novo uma vez.
+- **Chaves:**
+  - `LARECOMP_INPLACE_CBUF=0` desliga e `=1` força, inclusive com o lag;
+  - `LARECOMP_AB=<quadros>:inplace` alterna;
+  - `LARECOMP_CB_WINDOW=0` tira o teste dos shaders;
+  - o log mostra `[vk] constant buffers read in place: on/off`.
+- **Ganho esperado**, pelas medições do upstream (1.9.0, POCO): ~0,6 ms (`UBO_DIRECT`) + ~0,3 ms (janela) da thread de
+  render, que hoje está no caminho crítico.
+- **A conferir no aparelho:**
+  - visual: água, terreno de longe, golpes em objetos distantes;
+  - a medição de 60 s, comparada com os 22,1 ms.
