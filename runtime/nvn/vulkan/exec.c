@@ -3833,7 +3833,7 @@ static bool inplace_cbufs(void) {
     bool on = env >= 0 ? env > 0 : ab >= 0 ? ab == 1 : !g_sync_lag_now && g_diag_ab != 0;
     static int last = -1;
     if (gmem_placed && (int)on != last) {
-        LOG("[vk] constant buffers read in place: %s\n", on ? "on" : "off (sync lag)");
+        LOG("[vk] constant buffers read in place: %s\n", on ? "on" : g_sync_lag_now ? "off (sync lag)" : "off");
         last = on;
     }
     return on && gmem_placed;

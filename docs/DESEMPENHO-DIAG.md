@@ -134,3 +134,21 @@ Odin 2 Portal, Turnip 27, 1.8.2, Sync lag desligado (com ele, o Link afunda):
 - **A conferir no aparelho:**
   - visual: água, terreno de longe, golpes em objetos distantes;
   - a medição de 60 s, comparada com os 22,1 ms.
+
+### Resultado (Medir e comparar, 120 s, SoC no modo padrão, Sync lag desligado)
+
+| | Ligado | Desligado |
+| --- | --- | --- |
+| Intervalo entre quadros (p50 / média) | 26,12 / 26,40 ms | 26,51 / 26,57 ms |
+| CPU da thread de render por quadro | **10,21 ms** | 11,43 ms |
+| CPU da thread principal por quadro | 12,92 ms | 13,14 ms |
+| GPU ocupada por quadro (média) | 18,08 ms | 18,38 ms |
+| Clocks médios (MHz) | 1152 / 2525 / 1843 | 1122 / 2560 / 1887 |
+
+- **A thread de render ficou 1,2 ms mais rápida (-11%)**, e não apareceu nenhum artefato. A leitura no lugar fica
+  ligada por padrão sem o Sync lag.
+- **O quadro só ganhou 0,4 ms.** No modo padrão do SoC, quem segura é a **GPU**: 18 ms ocupada por quadro, contra
+  ~6,6 ms quando os clocks estavam no máximo. A thread principal espera a GPU ~10 ms por quadro.
+- **A causa provável:** o governador deixa o clock da GPU baixo, porque o quadro é em série (o jogo, depois a
+  tradução, depois a GPU) e a GPU fica parada parte do tempo.
+
