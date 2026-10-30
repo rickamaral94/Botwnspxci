@@ -256,10 +256,13 @@ void diag_pop_(void) {
 // ---------------------------------------------------------------- frames
 #define FMAX 16384
 static uint64_t f_interval[FMAX], f_acquire[FMAX], f_present[FMAX], f_gpu[FMAX], f_comp[FMAX];
-static uint64_t f_shown[FMAX], f_last_shown;
-static uint8_t f_shown_flags[FMAX];
-static uint64_t g_ts0[6];  // (vulkan/exec.c diag_gpu_ts_health at the window's start)  // (1, and 4 with the compared feature on)
-static uint64_t ab_real[2], ab_ns[2], ab_t;  // (A/B: real frames and gameplay time with the feature off / on)  // (the intervals between images as the compositor showed them)
+static uint64_t f_shown[FMAX], f_last_shown;  // (the intervals between images as the compositor showed them)
+static uint8_t f_shown_flags[FMAX];  // (1, and 4 with the compared feature on)
+#ifdef __ANDROID__
+static uint64_t g_ts0[6];  // (vulkan/exec.c diag_gpu_ts_health at the window's start)
+#endif
+static uint64_t rf_n, rf_ns;  // (real frames in gameplay and their time: the summary's real frames a second)
+static uint64_t ab_real[2], ab_ns[2], ab_t;  // (A/B: real frames and gameplay time with the feature off / on)
 static int f_nshown;
 static uint8_t f_flags[FMAX];  // 1 gameplay, 2 sampler on, 4 the compared feature on (diag_request_ab)
 static uint64_t f_rcpu[FMAX], f_mcpu[FMAX];  // the render thread's and the main thread's own CPU time per interval
@@ -297,7 +300,7 @@ void diag_request_ab(int seconds) {
 void diag_request(int seconds) {
     if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
     memset(ab_cl_sum, 0, sizeof ab_cl_sum), memset(ab_cl_samples, 0, sizeof ab_cl_samples);
-    memset(ab_real, 0, sizeof ab_real), memset(ab_ns, 0, sizeof ab_ns), ab_t = 0;
+    memset(ab_real, 0, sizeof ab_real), memset(ab_ns, 0, sizeof ab_ns), ab_t = 0, rf_n = rf_ns = 0;
     g_seconds = seconds > 0 ? seconds : 60;
     atomic_store(&win_t0, ~0ull);
     atomic_store(&win_t1, ~0ull);
@@ -339,9 +342,12 @@ void diag_displayed(uint32_t id, uint64_t t) {
 }
 // (vulkan/device.c) a real frame presented - with the frame generation, the generated ones aside
 void diag_real_frame(void) {
-    if (atomic_load(&g_state) != 2 || g_diag_ab < 0) return;
+    if (atomic_load(&g_state) != 2) return;
     uint64_t now = now_fn();
-    if (ab_t && now - ab_t < 250000000ull && diag_in_gameplay()) ab_real[g_diag_ab]++, ab_ns[g_diag_ab] += now - ab_t;
+    if (ab_t && now - ab_t < 250000000ull && diag_in_gameplay()) {
+        rf_n++, rf_ns += now - ab_t;
+        if (g_diag_ab >= 0) ab_real[g_diag_ab]++, ab_ns[g_diag_ab] += now - ab_t;
+    }
     ab_t = now;
 }
 void diag_gpu_composition(uint64_t ns) {
@@ -679,6 +685,36 @@ static void *report_main(void *arg) {
     int frames = f_n, game = f_n - f_nmenu;
     out("===== performance diagnosis: %.0f s, %d presents (%d in gameplay, %d in menus or events)", (t1 - t0) / 1e9, frames, game,
         f_nmenu);
+    {   // what it ran with, and one line to compare runs by (drivers: docs/DESEMPENHO-DIAG.md)
+        char ctx[768] = "n/a";
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+        extern void vk_diag_context(char *buf, size_t n);
+        vk_diag_context(ctx, sizeof ctx);
+#endif
+        out("run: %s", ctx);
+        double gpu = 0;
+        for (int i = 0; i < f_n; i++) if (f_flags[i] & 1) gpu += f_gpu[i] / 1e6;
+        double p50 = 0, p95 = 0, p99 = 0;
+        if (f_nshown) {
+            uint64_t *c = malloc(sizeof *c * (size_t)f_nshown);
+            if (c) {
+                memcpy(c, f_shown, sizeof *c * (size_t)f_nshown);
+                qsort(c, (size_t)f_nshown, sizeof *c, cmp_u64);
+                p50 = c[f_nshown / 2] / 1e6, p95 = c[(size_t)(f_nshown * 0.95)] / 1e6, p99 = c[(size_t)(f_nshown * 0.99)] / 1e6;
+                free(c);
+            }
+        }
+        char cl[160] = "n/a";
+        if (cl_samples && cl_n) {
+            int o = 0;
+            for (int i = 0; i < cl_n && o < (int)sizeof cl - 16; i++)
+                o += snprintf(cl + o, sizeof cl - (size_t)o, "%s%llu", i ? "/" : "", (unsigned long long)(cl_sum[i] / (uint64_t)cl_samples));
+        }
+        out("summary: %.2f real frames a second | screen p50 %.2f p95 %.2f p99 %.2f ms | GPU %.2f ms per real frame | "
+            "CPU clusters %s MHz | SoC %.0f-%.0f C",
+            rf_ns ? rf_n * 1e9 / rf_ns : 0.0, p50, p95, p99, rf_n ? gpu / (double)rf_n : 0.0, cl,
+            temp_max > -1e8f ? temp_min : 0.0f, temp_max > -1e8f ? temp_max : 0.0f);
+    }
     out("-- frames (the time between two vkQueuePresentKHR on the render thread)");
     stat_line("present interval, gameplay", f_interval, f_n, f_flags, 1, 1);
     stat_line("  of which with the sampler on", f_interval, f_n, f_flags, 3, 3);
@@ -806,6 +842,25 @@ static void *report_main(void *arg) {
     out("===== end of the diagnosis");
     if (g_out) fclose(g_out);
     g_out = NULL;
+    if (path) {  // (a copy by date and time, so several runs - one per driver - can be sent together)
+        char copy[1200];
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        const char *dot = strrchr(path, '.');
+        int stem = dot ? (int)(dot - path) : (int)strlen(path);
+        snprintf(copy, sizeof copy, "%.*s-%04d%02d%02d-%02d%02d%02d.txt", stem, path, tm.tm_year + 1900, tm.tm_mon + 1,
+                 tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+        FILE *in = fopen(path, "r"), *o = in ? fopen(copy, "w") : NULL;
+        if (o) {
+            char buf[8192];
+            size_t k;
+            while ((k = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, k, o);
+            fclose(o);
+            LOG("[diag] report copied to %s\n", copy);
+        }
+        if (in) fclose(in);
+    }
     // (the sampler stays installed, its timers stopped; the hooks stop counting)
     for (int i = 0; i < ns && i < SLOTS; i++)
         if (g_slots[i].live) { timer_delete(g_slots[i].timer); g_slots[i].live = false; free(g_slots[i].ring); g_slots[i].ring = NULL; }

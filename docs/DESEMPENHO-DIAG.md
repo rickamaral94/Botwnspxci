@@ -222,3 +222,29 @@ As contidas são submissões leves. O Turnip grava os timestamps delas assim que
 elas, sem esperar o trabalho anterior. A união dos intervalos continua valendo como tempo ocupado. No trecho pesado a
 dinâmica mede 23–27 ms de GPU por quadro, contra quadros de 36–40 ms. A GPU fica perto do limite no clock que o modo
 padrão dá, e baixar a resolução faz o governador baixar o clock junto.
+
+## Comparar drivers Turnip
+
+O relatório (`perf-diag.txt`) começa com duas linhas:
+
+- **`run:`** mostra a configuração da medição: o pacote do driver e o nome e a versão que ele declara, o LRZ, a
+  resolução interna (na Dinâmica, a escala do momento), o framegen, a taxa de quadros e o Sync lag.
+- **`summary:`** é a linha para comparar execuções. Ela traz quadros reais por segundo, a cadência na tela
+  (p50/p95/p99), a GPU por quadro real, os MHz médios dos clusters e a faixa de temperatura.
+
+Cada relatório também é copiado como `perf-diag-AAAAMMDD-HHMMSS.txt`, para várias medições irem juntas.
+
+**Protocolo:**
+
+1. Todos os drivers com as mesmas configurações:
+   - **resolução interna fixa**: não Dinâmica, para a GPU fazer o mesmo trabalho em todos;
+   - framegen 2x e 30 fps;
+   - SoC no modo padrão.
+2. O mesmo trecho, partindo de um save perto dele e fazendo o mesmo caminho.
+3. Esperar o aparelho esfriar entre as medições (a faixa de temperatura aparece no resumo).
+4. "Medir desempenho (60 s)" em cada driver.
+5. **No mesmo driver, LRZ ligado e desligado** (Iniciar > Turnip low-resolution Z). No Adreno 740 o automático o
+   deixa desligado, porque o LRZ pode perder desenhos em alguns Adreno. Ele economiza GPU em cenas com muita
+   sobreposição, mas é preciso conferir a imagem: objetos sumindo ou piscando.
+6. **Critério:** mais quadros reais por segundo e menor p95 na tela, com a GPU por quadro real como explicação, sem
+   defeito visual e com MHz e temperatura parecidos.

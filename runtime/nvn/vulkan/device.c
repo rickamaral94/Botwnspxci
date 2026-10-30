@@ -19,6 +19,7 @@
 #include "../renderer.h"
 
 VkG g_vk;
+static char g_vk_driver_desc[400] = "?";  // (vk_diag_context: the driver package and its own name / version)
 static SDL_Window *window;
 static atomic_bool ui_ready;
 static VkDebugUtilsMessengerEXT messenger;
@@ -639,6 +640,16 @@ static void create_device(void) {
                                               .pNext = driver_props ? &driver : NULL};
     vkGetPhysicalDeviceProperties2(g_vk.phys, &properties);
     if (!driver_props) snprintf(driver.driverName, sizeof driver.driverName, "unknown");
+    {   // (diag.c: the report says which driver it measured - comparing drivers, docs/DESEMPENHO-DIAG.md)
+        const char *drv = getenv("LARECOMP_VK_DRIVER"), *slash = drv ? strrchr(drv, '/') : NULL;
+        char pkg[128] = "the system's";
+        if (slash && slash > drv) {  // (.../drivers/<package>/libvulkan_*.so: the package's folder)
+            const char *b = slash - 1;
+            while (b > drv && b[-1] != '/') b--;
+            snprintf(pkg, sizeof pkg, "%.*s", (int)(slash - b), b);
+        }
+        snprintf(g_vk_driver_desc, sizeof g_vk_driver_desc, "%s (%s %s)", pkg, driver.driverName, driver.driverInfo);
+    }
     LOG("[vk-cap] gpu %s vendor %#x device %#x api %u.%u.%u driver-id %u name %s info %s\n",
         g_vk.props.deviceName, g_vk.props.vendorID, g_vk.props.deviceID, VK_API_VERSION_MAJOR(g_vk.props.apiVersion),
         VK_API_VERSION_MINOR(g_vk.props.apiVersion), VK_API_VERSION_PATCH(g_vk.props.apiVersion),
@@ -1833,6 +1844,23 @@ bool vk_turnip_path_on(int setting) {
     return g_vk.map_placed && vk_driver_is_turnip();
 }
 static bool g_lrz_at_start = true;
+// (diag.c) what the measurement ran with: the driver and the settings that move the GPU's work
+void vk_diag_context(char *buf, size_t n) {
+    extern double output_scale_dynamic_factor(void);
+    extern bool fg_overlay(float *, float *, int *);
+    float r, sh;
+    int mult = 0;
+    bool fg = fg_overlay(&r, &sh, &mult);
+    static const char *res[] = {"Match display", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x"};
+    char rs[48];
+    int m = g_settings.res_mode;
+    if (m >= 0 && m <= 8) snprintf(rs, sizeof rs, "%s", res[m]);
+    else if (m == RES_DYNAMIC) snprintf(rs, sizeof rs, "Dynamic (now %.2f)", output_scale_dynamic_factor());
+    else snprintf(rs, sizeof rs, "%s", m == RES_Q75 ? ".75x" : m == RES_Q50 ? ".50x" : m == RES_Q25 ? ".25x" : "?");
+    snprintf(buf, n, "driver %s | LRZ %s | internal resolution %s | frame generation %s | frame rate %s | sync lag %s",
+             g_vk_driver_desc, g_lrz_at_start ? "on" : "off", rs, fg ? (mult == 4 ? "4x" : mult == 3 ? "3x" : "2x") : "off",
+             g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : "auto", g_settings.sync_lag ? "on" : "off");
+}
 bool vk_lrz_at_start(void) { return g_lrz_at_start; }  // (the start screen: a change needs a restart)
 const char *vk_gpu_name(void) { return g_vk.props.deviceName; }
 #endif
