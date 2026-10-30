@@ -186,6 +186,14 @@ nativo (`android/.../cpp/lsfg_extract.cpp`, `lsfg_translate.cpp`):
   - faz `deleteContext` e `finalize`, libera as imagens e volta ao caminho direto;
   - o device mantém as features até o fim da sessão.
 - 3x/4x, flow scale ao vivo e 3.1P ficam para depois dos testes no Odin 2.
+- **Taxa da tela:** o aparelho de teste é o Odin 2 Portal, com tela de **120 Hz**.
+  - Ali o 2x pode partir de 60 (60 → 120) e o 3x de 40 (40 → 120). O 30 → 60 com 2x continua sendo o primeiro passo.
+  - Hoje o app não pede uma taxa de atualização ao Android: nem `ANativeWindow_setFrameRate`, nem
+    `preferredDisplayModeId`. A tela pode ficar em 60 Hz mesmo podendo 120.
+  - Antes de oferecer saídas acima de 60, a B2 precisa:
+    - registrar no log a taxa real da tela;
+    - pedir 120 Hz quando a saída do framegen passar de 60;
+    - limitar o multiplicador ao que a tela entrega.
 
 ### Contrato temporal (2x)
 
