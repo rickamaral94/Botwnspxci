@@ -33,6 +33,7 @@
 #include <string.h>
 
 #include "../hle.h"
+#include "../diag.h"
 #include "../platform.h"
 #include "../settings.h"
 #include "../framepace.h"
@@ -95,6 +96,12 @@ bool framepace_on_title(void) {
 static bool in_event(void) {
     uint64_t evt = *(uint64_t *)(uintptr_t)GV(0x7001cd8db8ull, 0x7001e3a638ull);
     return evt && *(uint64_t *)(uintptr_t)(evt + 0x1d2b8);
+}
+
+// (diag.c) playing: not in a menu, the pause or an event, and no movie
+bool diag_in_gameplay(void) {
+    if (g_game_version < 182) return true;
+    return !in_menu() && !in_event() && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) <= 0;
 }
 
 int framepace_target(void) {
