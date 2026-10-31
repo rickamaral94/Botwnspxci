@@ -6978,7 +6978,8 @@ static TexBackend *post_image(int i, uint32_t w, uint32_t h, VkFormat f) {
         // (the scene's EASU output, A2B10G10R10: compressed (UBWC) on Turnip, RCAS's texelFetch of it read 16x4 blocks
         // of zeros - black dashes in the grass, about one a frame on the Adreno 830; uncompressed with a mutable
         // format, as SGSR's single pass and an RGBA8 intermediate showed none either)
-        bool plain = i == 5 && f == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        // (the HUD's copy, 7, the same: the mask reads it with texelFetch too)
+        bool plain = (i == 5 || i == 7) && f == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
                                 .flags = plain ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0,
                                 .format = f, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
@@ -7246,15 +7247,18 @@ void vk_present_draw_view(VkCommandBuffer cb, VkImageView src, VkFormat fmt, VkE
 // (nn::ui2d's layouts: their camera's projection at the start of the vertex constants, [12..14] = 0, 0, -1, as
 // widescreen's pane fixes read them) into the final image after the 3D scene; a copy of that image just before the
 // first such draw (hud_capture), against the image as presented (vk_fg_hud_mask).
-// One copy a frame at most, and only of an image the window was shown lately (the game's two window textures take
-// turns): the first try copied every same-size target the layouts drew into, each time they switched - up to ~35
-// pass breaks a frame, 30 -> 25 real frames, and no copy of the presented one (Odin 2, 2026-10-31).
+// The HUD isn't drawn into the presented image: 1.8.2 draws its layouts (~100 draws a frame) into one 1920x1080
+// A2B10G10R10 target over the scene, then converts that into one of its two RGBA8 window textures, which is what is
+// presented (Odin 2, 2026-10-31). So the copy is of that target: the one the layouts drew into most the frame before,
+// at the presented image's size - once a frame (the first try copied every same-size target at each switch: up to
+// ~35 pass breaks a frame, 30 -> 25 real frames).
 static TexBackend *hud_cap_b;  // (the final image the copy is of; NULL: none)
 static uint64_t hud_cap_frame = ~0ull;  // (renderer_present_count when it was taken)
 static uint64_t stat_hud_caps;
 // (diagnosis) the targets the layouts drew into, the frame before: each its image, size, format and draws
 static struct { TexBackend *b; uint32_t n; } hud_seen[4], hud_last[4];
 static uint64_t hud_seen_frame;
+static TexBackend *hud_lock;  // (the target the layouts drew into most, the frame before)
 void vk_fg_hud_targets(char *out, size_t n) {
     size_t o = 0;
     out[0] = 0;
@@ -7263,18 +7267,22 @@ void vk_fg_hud_targets(char *out, size_t n) {
                               hud_last[i].b->height, (int)hud_last[i].b->format, hud_last[i].n);
 }
 static void hud_capture(NvnTexture *rt) {
-    extern bool fg_hud_capture_wanted(const TexBackend *b);
+    extern bool fg_hud_capture_wanted(uint32_t w, uint32_t h);
     TexBackend *b = vk_tex(rt, false);
     if (!b || !b->image) return;
     uint64_t now = renderer_present_count();
     if (hud_seen_frame != now) {
         memcpy(hud_last, hud_seen, sizeof hud_last), memset(hud_seen, 0, sizeof hud_seen);
         hud_seen_frame = now;
+        hud_lock = NULL;
+        uint32_t most = 0;
+        for (int i = 0; i < 4 && hud_last[i].b; i++)
+            if (hud_last[i].n > most) hud_lock = hud_last[i].b, most = hud_last[i].n;
     }
     for (int i = 0; i < 4; i++)
         if (!hud_seen[i].b || hud_seen[i].b == b) { hud_seen[i].b = b, hud_seen[i].n++; break; }
-    if (hud_cap_frame == now || b->samples != 1 || b->layers != 1 || b->levels < 1 ||
-        (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT) || !fg_hud_capture_wanted(b))
+    if (hud_cap_frame == now || (hud_lock && b != hud_lock) || b->samples != 1 || b->layers != 1 || b->levels < 1 ||
+        (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT) || !fg_hud_capture_wanted(b->width, b->height))
         return;
     vk_end_pass();  // (the scene drawn into it so far, stored; the HUD's draw begins its pass again)
     VkCommandBuffer cb = vk_cmd();
@@ -7290,11 +7298,14 @@ static void hud_capture(NvnTexture *rt) {
 }
 uint64_t vk_fg_hud_captures(void) { return stat_hud_caps; }
 
-// The mask of the presented image b, laid out as the window gets it (vx..vh, pv) into an image of size e: red = how
-// much HUD (soft, widened a little). NULL: no copy of b this frame (the HUD wasn't seen: no mask). Outside any
-// rendering.
-VkImageView vk_fg_hud_mask(VkCommandBuffer cb, TexBackend *b, VkExtent2D e, float vx, float vy, float vw, float vh, const float pv[8]) {
-    bool have = b && hud_cap_b == b && hud_cap_frame != ~0ull && renderer_present_count() - hud_cap_frame <= 1;
+// The mask of the presented image p, laid out as the window gets it (vx..vh, pv) into an image of size e: red = how
+// much HUD (soft, widened a little) - from the HUD's target as it is now against its copy from before the HUD, the
+// same size as p (its conversion into the window texture keeps the layout). NULL: no copy this frame (the HUD wasn't
+// seen: no mask). Outside any rendering.
+VkImageView vk_fg_hud_mask(VkCommandBuffer cb, TexBackend *p, VkExtent2D e, float vx, float vy, float vw, float vh, const float pv[8]) {
+    TexBackend *b = hud_cap_b;
+    bool have = p && b && b->image && b->width == p->width && b->height == p->height && hud_cap_frame != ~0ull &&
+                renderer_present_count() - hud_cap_frame <= 1;
     hud_cap_b = NULL;  // (the next frame takes its own)
     if (!have) return VK_NULL_HANDLE;
     TexBackend *pre = post_image(7, b->width, b->height, b->format);

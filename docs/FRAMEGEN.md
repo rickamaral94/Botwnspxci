@@ -495,3 +495,17 @@ imagem interpolada.
   janela do jogo se alternam).
 - Enquanto não houver cópia, o log mostra a cada 10 s em quais alvos os layouts desenharam e qual imagem foi
   apresentada, para identificar o caso.
+
+**Segundo teste** (31/10): voltou a 30 reais / 60 mostrados nos trechos normais, mas ainda sem cópia. O log de
+diagnóstico explicou o motivo:
+
+- os layouts fazem ~98 desenhos por quadro num único alvo 1920x1080 A2B10G10R10 (formato 64);
+- a imagem apresentada é outra: uma das duas texturas RGBA8 da janela (formato 37), para onde o jogo converte esse
+  alvo.
+
+**Correção:**
+
+- a cópia passa a ser desse alvo, o que recebeu mais desenhos de layout no quadro anterior, desde que tenha o
+  tamanho da imagem apresentada;
+- a máscara compara o alvo atual com a cópia;
+- a cópia é feita sem compressão (como a post image 5), porque a máscara a lê com `texelFetch`.
