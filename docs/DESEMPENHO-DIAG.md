@@ -273,3 +273,7 @@ segue só entre builds do Turnip, e com o LRZ ligado e desligado.
 - **LRZ no amaral:** em 1x com o LRZ ligado, a GPU gasta 14,9 ms por quadro real. Com o LRZ desligado e a escala em
   0,55 eram 16,5 ms. Ou seja, o LRZ economiza mais GPU do que baixar a resolução quase pela metade. Falta confirmar que
   não há defeito visual (desenhos sumindo ou piscando) para o automático ligar o LRZ no Adreno 740 com esse driver.
+
+**Decisão (31/10):** você confirmou que não viu defeito com o LRZ ligado no Adreno 740. O automático agora liga o LRZ
+nas Adreno 8xx e na Adreno 740 (`vk_lrz_auto`, `nvn/vulkan/device.c`). As outras Adreno 7xx continuam desligadas
+porque não foram testadas.
