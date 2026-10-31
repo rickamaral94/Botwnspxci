@@ -259,3 +259,17 @@ Cada relatório também é copiado como `perf-diag-AAAAMMDD-HHMMSS.txt`, para v�
 O driver do sistema tem muitos artefatos e falhas visuais. Ele roda no modo de cópia, sem o heap da GPU, e a thread de
 render chega a ~52 ms por quadro (ver `ANALISE-DRIVER-PADRAO-2026-10-21.md`). Por isso fica fora da comparação, que
 segue só entre builds do Turnip, e com o LRZ ligado e desligado.
+
+**Segunda rodada** (30/10, Odin 2, framegen 2x, resolução 1x fixa, 60 s):
+
+| Driver | LRZ | Quadros reais/s | Tela p50 / p95 / p99 | GPU por quadro real | SoC |
+| --- | --- | --- | --- | --- | --- |
+| turnip_amaral 27.0.0-devel v5.7.13.1 | ligado | **28,00** | 16,71 / 33,42 / 41,77 ms | **14,9 ms** | 47–66 °C |
+| Turnio v26.2.0 R4 (Mesa 26.2) | ligado | 15,65 | 41,78 / 75,20 / 75,23 ms | 17,2 ms | 42–51 °C |
+
+- **v26.2 R4:** a thread de render fica 77% do tempo "rodando" (24,9 ms por quadro), mas só 7,2 ms disso é CPU. O
+  resto é espera dentro do driver, no envio, que aparece como `ioctl`. Ele faz o mesmo trabalho que o amaral (~2000
+  desenhos por quadro) e fica com metade da taxa. Descartado.
+- **LRZ no amaral:** em 1x com o LRZ ligado, a GPU gasta 14,9 ms por quadro real. Com o LRZ desligado e a escala em
+  0,55 eram 16,5 ms. Ou seja, o LRZ economiza mais GPU do que baixar a resolução quase pela metade. Falta confirmar que
+  não há defeito visual (desenhos sumindo ou piscando) para o automático ligar o LRZ no Adreno 740 com esse driver.
