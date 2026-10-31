@@ -94,7 +94,7 @@ static VkQueryPool ts_pool;   // (the framegen's GPU time: our timestamps either
 static uint32_t ts_i;
 static bool ts_used[8];
 static uint64_t st_real, st_gen, st_drop, st_gpu_ns, st_gpu_n, st_since, st_hud;
-static uint32_t hud_w, hud_h;  // (the presented image's size: the one target the HUD mask copies - exec.c hud_capture)
+static const TexBackend *hud_shown[3];  // (the images presented lately: the targets the HUD mask copies - exec.c hud_capture)
 static double fg_gpu_ewma_ms;
 static uint64_t win_real, win_shown, win_t0;  // (the overlay's counts, every second)
 static float ov_real, ov_shown;
@@ -254,10 +254,11 @@ bool fg_use_now(void) {
 // (hle/framepace.c) the game's frame rate while the frame generation is on (the multiplier's base), else 0
 int fg_base_fps(void) { return fg_dev && !fg_failed && g_settings.framegen ? modes[mode_now()].base : 0; }
 
-// (exec.c hud_capture) whether to copy a w x h final image before its HUD: the frame generation runs, with its HUD mask,
-// in play, and it is the presented image's size
-bool fg_hud_capture_wanted(uint32_t w, uint32_t h) {
-    return ctx_on && !fg_failed && g_settings.fg_hud && w == hud_w && h == hud_h && diag_in_gameplay();
+// (exec.c hud_capture) whether to copy the final image b before its HUD: the frame generation runs, with its HUD mask,
+// in play, and b was presented lately
+bool fg_hud_capture_wanted(const TexBackend *b) {
+    if (!ctx_on || fg_failed || !g_settings.fg_hud || !diag_in_gameplay()) return false;
+    return b == hud_shown[0] || b == hud_shown[1] || b == hud_shown[2];
 }
 
 // (device.c) the most images a real frame queues (the swapchain's extra images)
@@ -350,7 +351,8 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
     // the HUD mask of B (Video > Frame generation HUD mask): where its HUD is, the generated frames take B's pixels
     extern VkImageView vk_fg_hud_mask(VkCommandBuffer, TexBackend *, VkExtent2D, float, float, float, float, const float *);
     extern VkImageView vk_fg_hud_composite(VkCommandBuffer, VkImageView, VkImageView, VkImageView, VkExtent2D);
-    hud_w = b->width, hud_h = b->height;
+    if (b != hud_shown[0] && b != hud_shown[1] && b != hud_shown[2])
+        hud_shown[2] = hud_shown[1], hud_shown[1] = hud_shown[0], hud_shown[0] = b;
     VkImageView hud = g_settings.fg_hud ? vk_fg_hud_mask(cb, b, e, vx, vy, vw, vh, pv) : VK_NULL_HANDLE;
     if (hud) st_hud++;
     ts_write(cb, tq);
@@ -425,6 +427,16 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
                     "HUD mask on %llu real frames\n",
                     (unsigned long long)st_real, (unsigned long long)st_gen, (unsigned long long)st_drop,
                     st_gpu_n ? st_gpu_ns / 1e6 / (double)st_gpu_n : 0.0, period / 1e6, (unsigned long long)st_hud);
+            {   // (the HUD mask's targets, every 10 s while it finds none: which images the layouts drew into)
+                static int quiet;
+                if (g_settings.fg_hud && !st_hud && quiet++ % 5 == 0) {
+                    extern void vk_fg_hud_targets(char *out, size_t n);
+                    char tg[400];
+                    vk_fg_hud_targets(tg, sizeof tg);
+                    LOG("[fg] HUD mask: no copy of the presented image (%p %ux%u fmt %d); the layouts drew into: %s\n", (void *)b,
+                        b->width, b->height, (int)b->format, tg[0] ? tg : "none");
+                }
+            }
             st_real = st_gen = st_drop = st_gpu_ns = st_gpu_n = st_hud = 0, st_since = t;
         }
     }

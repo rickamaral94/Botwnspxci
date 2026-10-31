@@ -7246,14 +7246,35 @@ void vk_present_draw_view(VkCommandBuffer cb, VkImageView src, VkFormat fmt, VkE
 // (nn::ui2d's layouts: their camera's projection at the start of the vertex constants, [12..14] = 0, 0, -1, as
 // widescreen's pane fixes read them) into the final image after the 3D scene; a copy of that image just before the
 // first such draw (hud_capture), against the image as presented (vk_fg_hud_mask).
+// One copy a frame at most, and only of an image the window was shown lately (the game's two window textures take
+// turns): the first try copied every same-size target the layouts drew into, each time they switched - up to ~35
+// pass breaks a frame, 30 -> 25 real frames, and no copy of the presented one (Odin 2, 2026-10-31).
 static TexBackend *hud_cap_b;  // (the final image the copy is of; NULL: none)
-static uint64_t hud_cap_frame;  // (renderer_present_count when it was taken)
+static uint64_t hud_cap_frame = ~0ull;  // (renderer_present_count when it was taken)
 static uint64_t stat_hud_caps;
+// (diagnosis) the targets the layouts drew into, the frame before: each its image, size, format and draws
+static struct { TexBackend *b; uint32_t n; } hud_seen[4], hud_last[4];
+static uint64_t hud_seen_frame;
+void vk_fg_hud_targets(char *out, size_t n) {
+    size_t o = 0;
+    out[0] = 0;
+    for (int i = 0; i < 4 && hud_last[i].b && o + 64 < n; i++)
+        o += (size_t)snprintf(out + o, n - o, "%s%p %ux%u fmt %d: %u", i ? "; " : "", (void *)hud_last[i].b, hud_last[i].b->width,
+                              hud_last[i].b->height, (int)hud_last[i].b->format, hud_last[i].n);
+}
 static void hud_capture(NvnTexture *rt) {
-    extern bool fg_hud_capture_wanted(uint32_t w, uint32_t h);
+    extern bool fg_hud_capture_wanted(const TexBackend *b);
     TexBackend *b = vk_tex(rt, false);
-    if (!b || !b->image || (b == hud_cap_b && hud_cap_frame == renderer_present_count()) || b->samples != 1 || b->layers != 1 || b->levels < 1 ||
-        (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT) || !fg_hud_capture_wanted(b->width, b->height))
+    if (!b || !b->image) return;
+    uint64_t now = renderer_present_count();
+    if (hud_seen_frame != now) {
+        memcpy(hud_last, hud_seen, sizeof hud_last), memset(hud_seen, 0, sizeof hud_seen);
+        hud_seen_frame = now;
+    }
+    for (int i = 0; i < 4; i++)
+        if (!hud_seen[i].b || hud_seen[i].b == b) { hud_seen[i].b = b, hud_seen[i].n++; break; }
+    if (hud_cap_frame == now || b->samples != 1 || b->layers != 1 || b->levels < 1 ||
+        (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT) || !fg_hud_capture_wanted(b))
         return;
     vk_end_pass();  // (the scene drawn into it so far, stored; the HUD's draw begins its pass again)
     VkCommandBuffer cb = vk_cmd();
@@ -7273,7 +7294,7 @@ uint64_t vk_fg_hud_captures(void) { return stat_hud_caps; }
 // much HUD (soft, widened a little). NULL: no copy of b this frame (the HUD wasn't seen: no mask). Outside any
 // rendering.
 VkImageView vk_fg_hud_mask(VkCommandBuffer cb, TexBackend *b, VkExtent2D e, float vx, float vy, float vw, float vh, const float pv[8]) {
-    bool have = b && hud_cap_b == b && renderer_present_count() - hud_cap_frame <= 1;
+    bool have = b && hud_cap_b == b && hud_cap_frame != ~0ull && renderer_present_count() - hud_cap_frame <= 1;
     hud_cap_b = NULL;  // (the next frame takes its own)
     if (!have) return VK_NULL_HANDLE;
     TexBackend *pre = post_image(7, b->width, b->height, b->format);

@@ -486,3 +486,12 @@ imagem interpolada.
 - Custo: uma cópia da imagem final por quadro real, a máscara e uma composição por quadro gerado, em torno de 1 ms.
 - O log do framegen mostra "HUD mask on N real frames" a cada 2 s. Com a máscara funcionando, N fica perto da
   quantidade de quadros reais.
+
+**Primeiro teste** (31/10, Odin 2): "HUD mask on 0 real frames", ou seja, nenhuma cópia da imagem apresentada.
+
+- Os layouts desenham em mais de um alvo RS_OUT do mesmo tamanho. A captura copiava cada um a cada troca de alvo:
+  até ~35 quebras de passe por quadro, e os quadros reais caíram de 30 para ~25.
+- **Correção:** no máximo uma cópia por quadro, e só de uma imagem apresentada recentemente (as duas texturas da
+  janela do jogo se alternam).
+- Enquanto não houver cópia, o log mostra a cada 10 s em quais alvos os layouts desenharam e qual imagem foi
+  apresentada, para identificar o caso.
