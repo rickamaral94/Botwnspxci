@@ -93,7 +93,8 @@ static uint64_t next_slot_ns;  // (with presentation times) the next free slot o
 static VkQueryPool ts_pool;   // (the framegen's GPU time: our timestamps either side of its work)
 static uint32_t ts_i;
 static bool ts_used[8];
-static uint64_t st_real, st_gen, st_drop, st_gpu_ns, st_gpu_n, st_since;
+static uint64_t st_real, st_gen, st_drop, st_gpu_ns, st_gpu_n, st_since, st_hud;
+static uint32_t hud_w, hud_h;  // (the presented image's size: the one target the HUD mask copies - exec.c hud_capture)
 static double fg_gpu_ewma_ms;
 static uint64_t win_real, win_shown, win_t0;  // (the overlay's counts, every second)
 static float ov_real, ov_shown;
@@ -253,6 +254,12 @@ bool fg_use_now(void) {
 // (hle/framepace.c) the game's frame rate while the frame generation is on (the multiplier's base), else 0
 int fg_base_fps(void) { return fg_dev && !fg_failed && g_settings.framegen ? modes[mode_now()].base : 0; }
 
+// (exec.c hud_capture) whether to copy a w x h final image before its HUD: the frame generation runs, with its HUD mask,
+// in play, and it is the presented image's size
+bool fg_hud_capture_wanted(uint32_t w, uint32_t h) {
+    return ctx_on && !fg_failed && g_settings.fg_hud && w == hud_w && h == hud_h && diag_in_gameplay();
+}
+
 // (device.c) the most images a real frame queues (the swapchain's extra images)
 int fg_queued_images(void) { return modes[g_settings.fg_mult >= 0 && g_settings.fg_mult <= 2 ? g_settings.fg_mult : 0].mult; }
 
@@ -340,6 +347,12 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
     vk_present_draw_view(cb, src, f, e, vx, vy, vw, vh, pv);
     vk_end_rendering(cb);
     vk_full_barrier(cb);  // (B's pixels, before the framegen reads them)
+    // the HUD mask of B (Video > Frame generation HUD mask): where its HUD is, the generated frames take B's pixels
+    extern VkImageView vk_fg_hud_mask(VkCommandBuffer, TexBackend *, VkExtent2D, float, float, float, float, const float *);
+    extern VkImageView vk_fg_hud_composite(VkCommandBuffer, VkImageView, VkImageView, VkImageView, VkExtent2D);
+    hud_w = b->width, hud_h = b->height;
+    VkImageView hud = g_settings.fg_hud ? vk_fg_hud_mask(cb, b, e, vx, vy, vw, vh, pv) : VK_NULL_HANDLE;
+    if (hud) st_hud++;
     ts_write(cb, tq);
     void renderer_submit(void);
     renderer_submit();  // (ours first on the queue; the framegen's next)
@@ -366,7 +379,8 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
             if (ts_pool) ts_write(vk_cmd(), tq + 1), ts_used[ts_i] = true;
             for (int i = 0; i < ctx_nout; i++) {  // (the generated frames in order, one slot each, then B)
                 g_vk.next_present_ns = t_i + (uint64_t)i * OUT_NS;
-                if (show(fout[i].view)) st_gen++;
+                VkImageView v = hud ? vk_fg_hud_composite(vk_cmd(), fout[i].view, fin[k].view, hud, e) : fout[i].view;
+                if (show(v)) st_gen++;
             }
             g_vk.next_present_ns = t_i + (uint64_t)ctx_nout * OUT_NS;
             next_slot_ns = t_i + (uint64_t)(ctx_nout + 1) * OUT_NS;
@@ -382,7 +396,7 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
         if (have_prev && !gen) st_drop++;
         if (gen) {
             if (ts_pool) ts_write(vk_cmd(), tq + 1), ts_used[ts_i] = true;
-            if (show(fout[0].view)) st_gen++;
+            if (show(hud ? vk_fg_hud_composite(vk_cmd(), fout[0].view, fin[k].view, hud, e) : fout[0].view)) st_gen++;
             plat_sleep_until_ns(last_shown_ns + period);
         }
     }
@@ -407,10 +421,11 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
                 fg_gpu_ewma_ms = fg_gpu_ewma_ms > 0 ? fg_gpu_ewma_ms * 0.5 + ms * 0.5 : ms;
             }
             if (log || diag_want_gpu_ts())
-                LOG("[fg] 2 s: %llu real, %llu generated, %llu dropped; framegen GPU %.2f ms a frame; output period %.1f ms\n",
+                LOG("[fg] 2 s: %llu real, %llu generated, %llu dropped; framegen GPU %.2f ms a frame; output period %.1f ms; "
+                    "HUD mask on %llu real frames\n",
                     (unsigned long long)st_real, (unsigned long long)st_gen, (unsigned long long)st_drop,
-                    st_gpu_n ? st_gpu_ns / 1e6 / (double)st_gpu_n : 0.0, period / 1e6);
-            st_real = st_gen = st_drop = st_gpu_ns = st_gpu_n = 0, st_since = t;
+                    st_gpu_n ? st_gpu_ns / 1e6 / (double)st_gpu_n : 0.0, period / 1e6, (unsigned long long)st_hud);
+            st_real = st_gen = st_drop = st_gpu_ns = st_gpu_n = st_hud = 0, st_since = t;
         }
     }
     return true;

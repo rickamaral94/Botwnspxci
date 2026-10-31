@@ -698,7 +698,7 @@ static void tab_display(void) {
             char why[256];
             int fs = fg_status(why, sizeof why);
             std::string desc = tr("Shows frames made by Lossless Scaling's frame generation between the game's own (the multiplier "
-                                  "below). Input feels about one frame later, and the game's HUD is interpolated too; the menus, "
+                                  "below). Input feels about one frame later; the menus, "
                                   "events and movies show the real frames. Turning it on takes effect when BOTWRecompAndroid "
                                   "starts again; off, at once.");
             desc += "\n\n";
@@ -716,6 +716,10 @@ static void tab_display(void) {
                        "generation costs the GPU much less, with more mistakes on small moving details. Applies at once.");
             opt_toggle("Frame generation performance mode", &g_settings.fg_performance, false,
                        "Lossless Scaling's lighter frame generation: cheaper on the GPU, a little less accurate. Applies at once.");
+            opt_toggle("Frame generation HUD mask", &g_settings.fg_hud, true,
+                       "Keeps the game's HUD (hearts, map, text) sharp in the generated frames: where it is, they show the real "
+                       "frame's pixels instead of the interpolated ones, which bend and smear it. Costs the GPU about 1 ms a "
+                       "frame. Applies at once.");
         }
         if (st == 1 && opt_button("Remove shaders", "Deletes the shaders translated from your Lossless.dll."))
             lsfg_remove();

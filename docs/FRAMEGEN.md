@@ -458,3 +458,31 @@ Uma janela sem leitura nenhuma não decide nada.
   do jogo.
 - O cluster principal fica em média a 1,9 GHz de 3,2 GHz no modo padrão do SoC.
 - Baixar a resolução não ajuda nesse caso.
+
+### Máscara do HUD (31/10)
+
+**Problema:** os quadros gerados entortam e borram o HUD (corações, minimapa, textos), porque o HUD faz parte da
+imagem interpolada.
+
+**Solução** (Vídeo > "Máscara do HUD na geração de quadros", ligada por padrão; `framegen_hud_mask` no ini):
+
+1. **Captura** (`exec.c` `hud_capture`): o jogo desenha o HUD na imagem final depois da cena 3D, com os layouts do
+   nn::ui2d. Esses desenhos têm a projeção da câmera do layout no início das constantes de vértice, com `[12..14] =
+   0, 0, -1`, a mesma assinatura que o widescreen usa. No primeiro desenho desses em um alvo RS_OUT do tamanho da
+   imagem apresentada, o passe é encerrado e a imagem é copiada (post image 7).
+2. **Máscara** (`vk_fg_hud_mask`, `fg_hud_mask.frag`):
+   - é a diferença entre a imagem final e essa cópia, no máximo dos canais;
+   - é alargada 2 texels para cada lado, porque os quadros gerados espalham um pouco as bordas do HUD;
+   - é suave (smoothstep de 3/255 a 40/255), então um painel translúcido recebe peso parcial;
+   - por fim, é desenhada no espaço da janela com o mesmo enquadramento do quadro real.
+3. **Composição** (`vk_fg_hud_composite`, `fg_hud.frag`): cada quadro gerado mostra
+   `mix(gerado, real B, máscara)`. Onde há HUD aparecem os pixels de B, o quadro real mais novo.
+
+**Limitações e custo:**
+
+- O HUD dos quadros gerados é o de B: ele não se move entre os quadros reais. Isso é o esperado, porque o HUD é quase
+  sempre parado.
+- Sob um painel translúcido, como o fundo do minimapa, o cenário anda a 30 quadros por segundo.
+- Custo: uma cópia da imagem final por quadro real, a máscara e uma composição por quadro gerado, em torno de 1 ms.
+- O log do framegen mostra "HUD mask on N real frames" a cada 2 s. Com a máscara funcionando, N fica perto da
+  quantidade de quadros reais.
