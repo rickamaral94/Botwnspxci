@@ -509,3 +509,9 @@ diagnóstico explicou o motivo:
   tamanho da imagem apresentada;
 - a máscara compara o alvo atual com a cópia;
 - a cópia é feita sem compressão (como a post image 5), porque a máscara a lê com `texelFetch`.
+
+**Terceiro teste** (31/10): "HUD mask on N real frames", com N igual ao número de quadros reais em todas as janelas.
+
+- Nos trechos normais ficou em 30 reais / 60 mostrados.
+- Nos trechos pesados caiu para 24–26 reais, como sem a máscara.
+- A máscara funciona.
