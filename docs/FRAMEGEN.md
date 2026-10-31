@@ -514,4 +514,4 @@ diagnóstico explicou o motivo:
 
 - Nos trechos normais ficou em 30 reais / 60 mostrados.
 - Nos trechos pesados caiu para 24–26 reais, como sem a máscara.
-- A máscara funciona.
+- A máscara funciona e fica ligada por padrão: você confirmou que o HUD fica firme e sem contorno, inclusive no minimapa.
