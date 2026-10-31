@@ -248,3 +248,14 @@ Cada relatório também é copiado como `perf-diag-AAAAMMDD-HHMMSS.txt`, para v�
    sobreposição, mas é preciso conferir a imagem: objetos sumindo ou piscando.
 6. **Critério:** mais quadros reais por segundo e menor p95 na tela, com a GPU por quadro real como explicação, sem
    defeito visual e com MHz e temperatura parecidos.
+
+**Primeiras medições** (30/10, Odin 2, framegen 2x, resolução Dinâmica, 120 s):
+
+| Driver | Quadros reais/s | Tela p50 / p95 / p99 | GPU por quadro real | Observação |
+| --- | --- | --- | --- | --- |
+| turnip_amaral 27.0.0-devel v5.7.13.1 (Mesa git-4b0f64ceac) | 28,79 | 16,71 / 33,43 / 41,78 ms | 16,5 ms | escala em 0,55 |
+| Qualcomm do sistema (build 69e13475cb, 27/12/2023) | 14,83 | 25,06 / 75,16 / 75,22 ms | 17,7 ms | inutilizável |
+
+O driver do sistema tem muitos artefatos e falhas visuais. Ele roda no modo de cópia, sem o heap da GPU, e a thread de
+render chega a ~52 ms por quadro (ver `ANALISE-DRIVER-PADRAO-2026-10-21.md`). Por isso fica fora da comparação, que
+segue só entre builds do Turnip, e com o LRZ ligado e desligado.

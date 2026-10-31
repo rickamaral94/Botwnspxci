@@ -649,6 +649,8 @@ static void create_device(void) {
             snprintf(pkg, sizeof pkg, "%.*s", (int)(slash - b), b);
         }
         snprintf(g_vk_driver_desc, sizeof g_vk_driver_desc, "%s (%s %s)", pkg, driver.driverName, driver.driverInfo);
+        for (char *c = g_vk_driver_desc; *c; c++)  // (Qualcomm's info runs over several lines: one line in the report)
+            if (*c == '\n' || *c == '\r') *c = ' ';
     }
     LOG("[vk-cap] gpu %s vendor %#x device %#x api %u.%u.%u driver-id %u name %s info %s\n",
         g_vk.props.deviceName, g_vk.props.vendorID, g_vk.props.deviceID, VK_API_VERSION_MAJOR(g_vk.props.apiVersion),
