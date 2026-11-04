@@ -1093,6 +1093,7 @@ static uint64_t gcopy_active_seq;
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
 static uint64_t gcopy_copied, gcopy_reused, gcopy_grow_saved, gcopy_grow_appends;
 static int gcopy_range_mode = -1;
+static int gcopy_range_env = -1;
 static void guest_copy_flush(void) { gcopy_gen++; gcopy_nactive = 0; }
 static void guest_copy_invalidate(uint64_t lo, uint64_t hi) {
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40);
@@ -1106,9 +1107,14 @@ static void guest_copy_invalidate(uint64_t lo, uint64_t hi) {
 // that BOTW really asks for growing ranges. Only the new tail of an already allocated span is written;
 // earlier draws may still refer to its initialized prefix. A write invalidates the entire source range.
 static VkSpan guest_copy(uint64_t addr, uint64_t size, bool vertex) {
-    if (gcopy_range_mode < 0) {
+    if (gcopy_range_env < 0) {
         const char *e = getenv("LARECOMP_GCOPY_RANGE");
-        gcopy_range_mode = e && atoi(e) != 0;
+        gcopy_range_env = e ? (atoi(e) != 0 ? 2 : 1) : 0;
+    }
+    int mode = gcopy_range_env ? gcopy_range_env == 2 : g_settings.gcopy_range;
+    if (gcopy_range_mode != mode) {
+        guest_copy_flush();  // a live slot may have been hashed by the old mode in this submission
+        gcopy_range_mode = mode;
         LOG("[guest-copy] range reuse %s\n", gcopy_range_mode ? "on" : "off");
     }
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40);
