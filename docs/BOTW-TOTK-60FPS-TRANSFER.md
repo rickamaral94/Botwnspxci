@@ -26,6 +26,12 @@ Log `botwrecomp-log.txt` das 15:06, com o mesmo BOTW 1.8.2, Turnip v5.8.17.1, LR
 
 Nas janelas quentes da nova rodada (t=43–89 s), 23 amostras de dois segundos tiveram média de 40,15 FPS; na referência 1×, 22 janelas similares tiveram 37,27 FPS. A queda de resolução reduziu a carga observada, mas ainda ficou longe dos 60 FPS e não tornou plausível resolver o platô somente mudando pixels. Próxima prioridade: medir custo GPU por passe e separar CPU, submissões, descriptors e cópias em cena equivalente. Manter 1× como alvo de qualidade.
 
+## Experimentos anteriores que orientam o próximo ciclo
+
+Os registros existentes em `docs/ANALISE-DRIVER-PADRAO-2026-10-21.md`, `docs/DESEMPENHO-60FPS-2026-10-23.md` e `docs/BOTW-PORT.md` já examinaram o mesmo tipo de carga: dividir os sets de texturas dos UBOs reduziu binds, mas não o tempo de GPU; SGSR reduziu o tempo GPU numa sessão BOTW 1.9.0 sem melhorar o período do quadro; e um perfil por passe mostrou o G-buffer como parte importante do custo, com o perfilador aumentando significativamente o próprio tempo medido. Não repetir essas mudanças como solução presumida para 1.8.2. Também há evidência histórica de uma cadeia serial entre lógica do jogo, tradução da lista e apresentação, variando com a versão e a cena.
+
+Na captura nova de 1.8.2, a render thread consumiu 10,14 ms de CPU por quadro; 29,2% de suas amostras ficaram em `libvulkan_freedreno.so`. A thread principal consumiu 12,50 ms de CPU e 8,80 ms em espera GPU por quadro. São tempos de threads diferentes, com sobreposição, não parcelas que se somam para obter o frametime. Há ~140 mil draws e ~1,2 GB de reservas lógicas do ring por dois segundos nas janelas quentes. O perfil por passe (`LARECOMP_GPUPROF_AT`) e o detalhamento de CPU (`LARECOMP_VK_PROF`) já existem; ativá-los de forma curta e isolada no trecho 1× e comparar com a execução sem perfil para estimar sua perturbação. O relatório `[guest-copy-diag]` só virá de uma build da PR, e não desta captura. A hipótese do cache de vértices permanece **sem validação**.
+
 ## Transferências entre os projetos
 
 | Direção | Estado | Decisão |
