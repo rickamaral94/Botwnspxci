@@ -12,6 +12,20 @@ Análise em 2026-11-04 dos logs `botwrecomp-log.txt` e `botwrecomp-log-previous.
 | Janelas quentes: ~143 mil draws e ~1.108 MB de alocação lógica do anel a cada 2 s na captura atual. | Muito trabalho de tradução/upload; o log não atribui bytes a vértices, uniforms, cópias de texturas ou espaço reservado no anel. |
 | SoC 46–71 °C; Android thermal status 0. | Temperatura elevada, mas sem evidência de thermal throttling no status. |
 
+## Rodada de sensibilidade a 0,75× (recebida depois da análise inicial)
+
+Log `botwrecomp-log.txt` das 15:06, com o mesmo BOTW 1.8.2, Turnip v5.8.17.1, LRZ, 60 selecionados, framegen e sync lag desligados. O `botwrecomp-log-previous.txt` desta rodada contém apenas a inicialização de 15:05; a referência de 1× abaixo vem da captura anterior descrita acima. **Não é A/B/BA da PR: a build é a mesma e não há `[guest-copy-diag]`, logo a opção experimental não estava disponível/ligada.**
+
+| Métrica | Referência 1× | Nova rodada 0,75× | Limite da comparação |
+| --- | ---: | ---: | --- |
+| FPS reais, diagnóstico 60 s | 37,56 | 40,08 | +2,52 FPS (+6,7%) observados entre sessões; percurso/cache/calor não idênticos. |
+| Present p50 / p95 / p99 | 26,12 / 32,26 / 44,34 ms | 24,81 / 28,00 / 32,31 ms | Melhora observada na distribuição; não atribuída exclusivamente à resolução. |
+| GPU busy p50 / p95 por intervalo | 22,02 / 25,07 ms | 20,43 / 21,87 ms | Há spans sobrepostos (4.384 de 11.218 na nova captura); a média agregada de 15,01 ms não comprova folga por quadro. |
+| CPU principal / render, clock próprio | 13,05 / 9,66 ms/quadro | 12,50 / 10,14 ms/quadro | Trabalho e percurso variam. |
+| Temperatura do SoC | 46–71 °C | 42–52 °C | Fator de confusão importante; Android thermal status 0 nas duas capturas. |
+
+Nas janelas quentes da nova rodada (t=43–89 s), 23 amostras de dois segundos tiveram média de 40,15 FPS; na referência 1×, 22 janelas similares tiveram 37,27 FPS. A queda de resolução reduziu a carga observada, mas ainda ficou longe dos 60 FPS e não tornou plausível resolver o platô somente mudando pixels. Próxima prioridade: medir custo GPU por passe e separar CPU, submissões, descriptors e cópias em cena equivalente. Manter 1× como alvo de qualidade.
+
 ## Transferências entre os projetos
 
 | Direção | Estado | Decisão |
@@ -26,4 +40,4 @@ Análise em 2026-11-04 dos logs `botwrecomp-log.txt` e `botwrecomp-log-previous.
 
 Mesmo save/driver/câmera, framegen desligado, sync lag fixo, energia e calor equivalentes: A (cópia padrão), B (`LARECOMP_GCOPY_RANGE=1`), A de novo; cache quente e depois frio. Repetir resolução 1×/0,75× separadamente. Registrar FPS real, p95/p99, GPU por passe, CPU render/main, bytes `[guest-copy-diag]`, RSS/Scudo e correção de geometria. O perfilador detalhado (`LARECOMP_VK_PROF`) pode alterar custo; medir seu overhead. Sem aparelho conectado e sem SDK/NDK neste workspace, não há build ARM64 nem validação de ganho deste candidato.
 
-Critério para habilitar por padrão: menos cópia e melhora de frametime reproduzível sem vertices desatualizados, crashes ou aumento relevante de memória; caso não ocorra, reverter. Para chegar a 60 FPS nativos em 1×, o teste de resolução precisa primeiro indicar quanto do orçamento é trabalho GPU escalável.
+Critério para habilitar por padrão: menos cópia e melhora de frametime reproduzível sem vertices desatualizados, crashes ou aumento relevante de memória; caso não ocorra, reverter. A comparação de resolução já indica efeito limitado; o passo seguinte é localizar os passes e o trabalho de render que consomem os ~8 ms por quadro restantes antes de atribuir o custo ao driver ou ao jogo.
