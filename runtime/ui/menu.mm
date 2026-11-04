@@ -673,6 +673,9 @@ static void tab_display(void) {
                "With Sync lag off: the GPU reads the game's per-draw constants where the game keeps them instead of copies - "
                "less work for the render thread. Being tested: if Link's legs sink into the ground with it on, leave it off. "
                "Applies at once.");
+    opt_toggle("Vertex copy reuse (experimental)", &g_settings.gcopy_range, false,
+               "Reuses the copied prefix when consecutive draws read a growing range of the same vertex buffer. "
+               "Compare the same scene with this off, on, then off again. Watch for broken geometry. Applies at once.");
     opt_toggle("Native game code (experimental)", &g_settings.native_code, false,
                "Runs the game's own code directly on the phone's CPU instead of the game code built at setup: no build "
                "needed. An experiment - report what goes wrong. Applies the next time the game starts.");
