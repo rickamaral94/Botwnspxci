@@ -1086,11 +1086,14 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 
 // Guest memory copied once per submission: draws binding the same range share the copy.
 #define GCOPY_TAB 4096
-static struct { uint64_t addr, size, seq; VkSpan span; } gcopy[GCOPY_TAB];
+static struct { uint64_t addr, size, capacity, seq, tracked; VkSpan span; } gcopy[GCOPY_TAB];
 static uint16_t gcopy_active[GCOPY_TAB];
 static int gcopy_nactive;
 static uint64_t gcopy_active_seq;
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
+static uint64_t gcopy_copied, gcopy_reused, gcopy_grow_saved, gcopy_grow_appends;
+static int gcopy_range_mode = -1;
+static int gcopy_range_env = -1;
 static void guest_copy_flush(void) { gcopy_gen++; gcopy_nactive = 0; }
 static void guest_copy_invalidate(uint64_t lo, uint64_t hi) {
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40);
@@ -1100,15 +1103,59 @@ static void guest_copy_invalidate(uint64_t lo, uint64_t hi) {
         if (gcopy[s].seq == seq && gcopy[s].addr < hi && lo < gcopy[s].addr + gcopy[s].size) gcopy[s].seq = 0;
     }
 }
-static VkSpan guest_copy(uint64_t addr, uint64_t size) {
-    uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
+// The range mode adapts TOTK's vertex-prefix reuse. It is opt-in until A/B/BA on the Odin confirms
+// that BOTW really asks for growing ranges. Only the new tail of an already allocated span is written;
+// earlier draws may still refer to its initialized prefix. A write invalidates the entire source range.
+static VkSpan guest_copy(uint64_t addr, uint64_t size, bool vertex) {
+    if (gcopy_range_env < 0) {
+        const char *e = getenv("LARECOMP_GCOPY_RANGE");
+        gcopy_range_env = e ? (atoi(e) != 0 ? 2 : 1) : 0;
+    }
+    int mode = gcopy_range_env ? gcopy_range_env == 2 : g_settings.gcopy_range;
+    if (gcopy_range_mode != mode) {
+        guest_copy_flush();  // a live slot may have been hashed by the old mode in this submission
+        gcopy_range_mode = mode;
+        LOG("[guest-copy] range reuse %s\n", gcopy_range_mode ? "on" : "off");
+    }
+    uint64_t seq = vk_pending_seq() + (gcopy_gen << 40);
+    uint64_t h = addr * 0x9E3779B97F4A7C15ull;
+    if (!gcopy_range_mode) h ^= size * 0xC2B2AE3D27D4EB4Full;
     if (gcopy_active_seq != seq) { gcopy_active_seq = seq; gcopy_nactive = 0; }
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
-    if (gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size) return gcopy[slot].span;
-    if (gcopy[slot].seq != seq && gcopy_nactive < GCOPY_TAB) gcopy_active[gcopy_nactive++] = (uint16_t)slot;
-    VkSpan s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
+    if (gcopy[slot].seq == seq && gcopy[slot].addr == addr) {
+        if (gcopy[slot].size == size || (gcopy_range_mode && gcopy[slot].size > size)) {
+            gcopy_reused += size;
+            return gcopy[slot].span;
+        }
+        if (gcopy_range_mode && vertex && size > gcopy[slot].size && size <= gcopy[slot].capacity) {
+            uint64_t old = gcopy[slot].size;
+            memcpy((uint8_t *)gcopy[slot].span.ptr + old, (const void *)(uintptr_t)(addr + old), size - old);
+            gcopy[slot].size = size;
+            gcopy_copied += size - old;
+            gcopy_reused += old;
+            gcopy_grow_saved += old;
+            gcopy_grow_appends++;
+            stat_cb_copied += size - old;
+            return gcopy[slot].span;
+        }
+    }
+    // Keep a slot on the invalidation list once per submission, even if a write dropped its payload.
+    if (gcopy[slot].tracked != seq && gcopy_nactive < GCOPY_TAB) {
+        gcopy_active[gcopy_nactive++] = (uint16_t)slot;
+        gcopy[slot].tracked = seq;
+    }
+    uint64_t capacity = size;
+    if (gcopy_range_mode && vertex && gcopy[slot].seq == seq && gcopy[slot].addr == addr &&
+        size > gcopy[slot].size && size <= (1u << 20)) {
+        capacity = 16;
+        while (capacity < size) capacity <<= 1;
+    }
+    VkSpan s = vk_transient(capacity ? capacity : 16, 256);
+    if (size) memcpy(s.ptr, (const void *)(uintptr_t)addr, size);
     stat_cb_copied += size;
-    gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s;
+    gcopy_copied += size;
+    gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].capacity = capacity;
+    gcopy[slot].seq = seq; gcopy[slot].span = s;
     return s;
 }
 
@@ -1319,6 +1366,10 @@ const char *renderer_stats(void) {
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              atomic_exchange(&stat_compiles, 0), (double)stat_build_wait_ns / 1e6, (unsigned long long)stat_feedback_copies, (unsigned long long)stat_feedback_reads, (unsigned long long)stat_inplace_breaks, (double)stat_upload_bytes / 1048576.0,
              (unsigned long long)stat_pipe_binds, (unsigned long long)stat_set_binds);
+    LOG("[guest-copy-diag] mode=%d copied=%.2fMB reused=%.2fMB grow_saved=%.2fMB tail_appends=%llu; same renderer interval\n",
+        gcopy_range_mode > 0, gcopy_copied / 1048576.0, gcopy_reused / 1048576.0,
+        gcopy_grow_saved / 1048576.0, (unsigned long long)gcopy_grow_appends);
+    gcopy_copied = gcopy_reused = gcopy_grow_saved = gcopy_grow_appends = 0;
     stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
         LOG("[cbuf] fixed %llu x %.1f KB, dynamic %llu x %.1f KB; copied %.1f MB; in place, patched %llu\n",
@@ -3610,7 +3661,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         NvnShaderStage *ss = &st.program->stages[stage];
         uint64_t size = ss->const_size ? ss->const_size : 16;
         if (size < si->cbuf_size[1]) size = si->cbuf_size[1];
-        return ubo_span(guest_copy(ss->code_addr + ss->const_offset, size), size);  // (constant: shared per submission)
+        return ubo_span(guest_copy(ss->code_addr + ss->const_offset, size, false), size);  // (constant: shared per submission)
     }
     int idx = k - 3;  // cbuf_base
     Range r = (idx >= 0 && idx < 18) ? st.ubuf[stage][idx] : (Range){0, 0};
@@ -3814,7 +3865,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     stat_cb_n[dk]++, stat_cb_bytes[dk] += size;
     if (dk && ct_on()) LOG("[ct] dyncbuf stage %d k %d addr %llx size %llx (bound %llx) fs %016llx\n", stage, k, (unsigned long long)r.addr,
                            (unsigned long long)size, (unsigned long long)r.size, (unsigned long long)g_cur_fs_hash);
-    return ubo_span(guest_copy(r.addr, size), size);
+    return ubo_span(guest_copy(r.addr, size, false), size);
 }
 
 // Global memory (shader LDG/STG, maxwell_gmem_base = HEAP_BASE): the guest heap imported as a GPU buffer
@@ -6447,7 +6498,7 @@ static void draw_(CmdRec *r, bool indexed) {
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
             if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }
-            else sp = guest_copy(v.addr, need ? need : 16);
+            else sp = guest_copy(v.addr, need ? need : 16, true);
         }
         VkDeviceSize off = sp.off;
         if (ss_on && (ss.vb_known >> s & 1) && ss.vb[s] == sp.buf && ss.vo[s] == off) continue;
