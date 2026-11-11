@@ -32,7 +32,9 @@ Começar com framegen desligado.
 1. **Compute:** Amaral.1 → Amaral.2 → Amaral.1. Em sessão longa com teletransportes e
    santuários, procurar `[compute-cache]` acima de 256 programas, compilação
    repetida, memória, p95/p99, imagem e travadas. Uma rota curta que nunca
-   chegue a 256 programas verifica apenas regressão de uso comum.
+   chegue a 256 programas verifica apenas regressão de uso comum. A volta para
+   Amaral.1 é um downgrade de versionCode e pode exigir reinstalação. Exporte o
+   save antes e importe o mesmo save nas duas builds.
 2. **Modo de cópia:** na Amaral.2, alternar `LARECOMP_GRES_LEGACY=1` e
    `LARECOMP_GRES_LEGACY=0`. Confirmar que o caminho de cópia com arena está ativo
    e registrar `[gmiss] learned_range_limit`. Comparar iluminação, `[gmiss]`,
@@ -46,3 +48,12 @@ Começar com framegen desligado.
 
 Se a diferença persistir variando apenas o driver, registrar a coleta na
 [seção Turnip](TURNIP.md). Estas mudanças atuam no runtime do APK.
+
+## Validação do APK
+
+- Fonte compilada: [`b8dd4533533e`](https://github.com/rickamaral94/Botwnspxci/commit/b8dd4533533ec62f078a1b8ef8be4a4897f6d3f0).
+- `assembleRelease` e `lintVitalRelease` passaram com JDK 17, SDK 36, NDK r30 e CMake 3.30.4.
+- Testes no host passaram para cache compute com 768 endereços, falha de alocação na expansão, recência e descarte de faixas e ambos os modos de espera. Passaram também os testes de compilação do jogo, RomFS e cache de shaders.
+- O teste legado de cache de uploads falha ao extrair código que depende de símbolos ausentes no harness. O trecho extraído é idêntico na Amaral.1 e na Amaral.2.
+- APK final `BOTW-0.3.4-beta-amaral.2-arm64.apk`, 90.772.564 bytes, SHA-256 `8cd3ebfae2a1398652c4ae1294ac8a1359f2a3f740a0565aa268ebee4eab4062`. ZIP, alinhamento, pacote, versão e ABI conferidos. Assinatura v3 com o certificado fixo BOTWDroid Amaral.
+- Validação de instalação e gameplay no Odin 2 pendente.
