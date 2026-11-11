@@ -10,6 +10,11 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [60 FPS e cache de vértices](2026-11-historico-odin2.md#60-fps-e-cache-de-vértices) | BOTW 1.8.2, Odin 2 Portal | 37,56 FPS reais na cena pesada a 1×. O ganho do cache experimental aguarda teste físico. |
 | [Upstream 0.3.4-beta-amaral.1](2026-11-historico-odin2.md#upstream-034-beta-amaral1) | Build e testes no host | APK e testes verificados no host. A validação em hardware segue pendente no relatório. |
 
+## Revisões externas e Turnip
+
+- [11/11 — outros ports e experimentos para o BOTW](2026-11-11-revisao-externa.md)
+- [Turnip — evidências para o Amaral Adreno Tools](TURNIP.md)
+
 ## Próxima rodada no Odin 2 Portal
 
 1. Comparar a build de referência e a candidata no Grande Platô, com o mesmo save, trajeto, versão do jogo, driver, resolução, cache aquecido, modo de energia e temperatura inicial comparável. Rodar A/B/A com framegen desligado e registrar FPS reais, p95/p99, 1% low e regressões visuais ou de física.

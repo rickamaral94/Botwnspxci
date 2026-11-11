@@ -26,6 +26,10 @@ Para teste de host, registre o comando e o resultado em lugar da tabela de FPS.
 - Limites da coleta e hipóteses em aberto.
 - Próximo teste, critério de decisão e referência da thread, se houver.
 
+## Evidência para o Turnip, quando aplicável
+
+Registre variante, Mesa SHA, hash do patchset, build-id e SHA-256 do ELF e ZIP. Vincule o teste à [seção Turnip](TURNIP.md) e indique o que o ensaio isolou no app ou no driver.
+
 ## Revisão
 
 Data, agente, evidência conferida e parecer.
