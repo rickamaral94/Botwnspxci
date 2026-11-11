@@ -41,28 +41,49 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
 }
 
 // ---- shadow pages: guest page -> host block of SHADOW_PAGE * SHADOW_K bytes (allocated at first use, kept)
+// Asked for every record the game's threads write, several at once: a lookup takes no lock - slots are only ever
+// added (mem published before page). The lock is only for adding one: under it every record contended (futex wakes and
+// bionic's contention trace writes, ~15% of the game's threads, the critical path of the frame; simpleperf
+// 2026-10-31). No per-thread cache of the last page: a thread-local costs a dynamic TLS resolve in this library.
 enum { SHADOW_SLOTS = 1 << 16 };
 static struct { uint64_t page; uint8_t *mem; } g_shadow[SHADOW_SLOTS];
 static pthread_mutex_t g_shadow_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static uint8_t *shadow_find(uint64_t page, uint32_t *at) {
+    uint32_t i = (uint32_t)(page * 0x9E3779B97F4A7C15ull >> 48) & (SHADOW_SLOTS - 1);
+    for (uint64_t p; (p = __atomic_load_n(&g_shadow[i].page, __ATOMIC_ACQUIRE)); i = (i + 1) & (SHADOW_SLOTS - 1))
+        if (p == page) return g_shadow[i].mem;
+    *at = i;
+    return NULL;
+}
+
+int g_cmd_shadow_pages, g_cmd_host_chunks;  // (the memory mappings log: platform/android.c)
+
 static uint64_t shadow_at(uint64_t guest) {
     uint64_t page = guest / SHADOW_PAGE + 1;  // (+1: 0 marks an empty slot)
-    pthread_mutex_lock(&g_shadow_lock);
-    uint32_t i = (uint32_t)(page * 0x9E3779B97F4A7C15ull >> 48) & (SHADOW_SLOTS - 1);
-    while (g_shadow[i].page && g_shadow[i].page != page) i = (i + 1) & (SHADOW_SLOTS - 1);
-    if (!g_shadow[i].page) {
-        g_shadow[i].mem = malloc(SHADOW_PAGE * SHADOW_K + sizeof(CmdRec));
-        if (!g_shadow[i].mem) FATAL("nvn: no memory for a command shadow page\n");
-        g_shadow[i].page = page;
+    uint32_t i;
+    uint8_t *m = shadow_find(page, &i);
+    if (!m) {
+        pthread_mutex_lock(&g_shadow_lock);
+        if (!(m = shadow_find(page, &i))) {  // (still missing: added at the empty slot it ended on)
+            m = malloc(SHADOW_PAGE * SHADOW_K + sizeof(CmdRec));
+            if (!m) FATAL("nvn: no memory for a command shadow page\n");
+            g_cmd_shadow_pages++;
+            g_shadow[i].mem = m;
+            __atomic_store_n(&g_shadow[i].page, page, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&g_shadow_lock);
     }
-    uint8_t *m = g_shadow[i].mem;
-    pthread_mutex_unlock(&g_shadow_lock);
     return (uint64_t)(uintptr_t)m + guest % SHADOW_PAGE * SHADOW_K;
 }
 
 // The chunk records go to: cb->gmem (guest address; 0: host memory at cb->mem), cb->size and cb->used in game bytes.
-static uint64_t write_at(const NvnCmdBuf *cb) {
-    return cb->gmem ? shadow_at(cb->gmem + cb->used) : cb->mem + cb->used * SHADOW_K;
+// (the page last written kept in the command buffer: a page's shadow never moves, so it can't go stale)
+static uint64_t write_at(NvnCmdBuf *cb) {
+    if (!cb->gmem) return cb->mem + cb->used * SHADOW_K;
+    uint64_t guest = cb->gmem + cb->used, page = guest / SHADOW_PAGE + 1;
+    if (page != cb->shadow_page) cb->shadow_mem = shadow_at(guest - guest % SHADOW_PAGE), cb->shadow_page = page;
+    return cb->shadow_mem + guest % SHADOW_PAGE * SHADOW_K;
 }
 
 // The list being recorded goes on at `to` (a jump to it).
@@ -137,6 +158,7 @@ static void add_host_memory(NvnCmdBuf *cb, uint32_t need) {
     uint8_t *mem = malloc(size * SHADOW_K);
     if (!mem) FATAL("nvn: out of command memory (host, %llu bytes)\n", (unsigned long long)(size * SHADOW_K));
     total += size * SHADOW_K;
+    g_cmd_host_chunks++;
     if (ENV("LARECOMP_LOG_CMDMEM"))
         LOG("[nvn] command buffer %llx: %llu bytes of host command memory (%llu KB in all)\n",
             (unsigned long long)cb->guest, (unsigned long long)(size * SHADOW_K), (unsigned long long)(total / 1024));
@@ -333,8 +355,21 @@ NVN(nvnCommandBufferBindSeparateSampler) {
         LOG("[nvn] BindSeparateSampler #%u stage %llu slot %llu handle %llx\n", n, (unsigned long long)A(1), (unsigned long long)A(2),
             (unsigned long long)A(3));
 }
-NVN(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; }
+// Transform feedback (stream out): not done - logged, should a game use it. BOTW 1.9.0 doesn't (none with #168's
+// leaves on screen, 2026-11-02)
+static void xfb_log(const char *what, Cpu *c) {
+    static unsigned n[8];
+    static const char *names[8];
+    int i = 0;
+    while (i < 7 && names[i] && names[i] != what) i++;
+    names[i] = what;
+    unsigned k = ++n[i];
+    if (k <= 4 || (k & (k - 1)) == 0)
+        LOG("[nvn] %s #%u: %llx %llx %llx %llx\n", what, k, (unsigned long long)c->x[1], (unsigned long long)c->x[2],
+            (unsigned long long)c->x[3], (unsigned long long)c->x[4]);
+}
+NVN(nvnCommandBufferBindTransformFeedbackBuffers) { xfb_log("BindTransformFeedbackBuffers", c); }
+NVN(nvnCommandBufferBindTransformFeedbackBuffer) { xfb_log("BindTransformFeedbackBuffer", c); }
 NVN(nvnCommandBufferBindCoverageModulationTable) { (void)c; }
 
 NVN(nvnCommandBufferSetTexturePool) {
@@ -524,14 +559,14 @@ PLAIN(nvnCommandBufferDrawArraysIndirect, CMD_DRAW_ARRAYS_INDIRECT)
 PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
 NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { (void)c; }
 NVN(nvnCommandBufferMultiDrawElementsIndirectCount) { (void)c; }
-NVN(nvnCommandBufferDrawTransformFeedback) { (void)c; }
+NVN(nvnCommandBufferDrawTransformFeedback) { xfb_log("DrawTransformFeedback", c); }
 NVN(nvnCommandBufferDrawTexture) { (void)c; }
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)
 PLAIN(nvnCommandBufferDispatchComputeIndirect, CMD_DISPATCH_INDIRECT)
-NVN(nvnCommandBufferBeginTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferEndTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferPauseTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferResumeTransformFeedback) { (void)c; }
+NVN(nvnCommandBufferBeginTransformFeedback) { xfb_log("BeginTransformFeedback", c); }
+NVN(nvnCommandBufferEndTransformFeedback) { xfb_log("EndTransformFeedback", c); }
+NVN(nvnCommandBufferPauseTransformFeedback) { xfb_log("PauseTransformFeedback", c); }
+NVN(nvnCommandBufferResumeTransformFeedback) { xfb_log("ResumeTransformFeedback", c); }
 
 // ---- copies
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRef;

@@ -27,14 +27,14 @@ for f in "$SRC"/*.cpp "$OUT/obj/astcenccli_platform_dependents.cpp"; do
     [ "$f" = "$SRC/astcenccli_platform_dependents.cpp" ] && continue
     o="$OUT/obj/$(basename "$f" .cpp).o"
     [ -f "$o" ] && continue
-    clang++ -std=c++17 -O2 -DNDEBUG $DEFS -I"$OUT/obj" -I"$SRC" -c "$f" -o "$o" &
+    clang++ -std=c++20 -O2 -DNDEBUG $DEFS -I"$OUT/obj" -I"$SRC" -c "$f" -o "$o" &
     pids+=($!)
 done
 for p in "${pids[@]}"; do wait "$p"; done
 LIB=$(ls "$OUT"/obj/astcenc_*.o)
 [ -f "$OUT/astcenc$EXE" ] || clang++ "$OUT"/obj/*.o -o "$OUT/astcenc$EXE"
 
-clang++ -std=c++17 -O2 $DEFS -I"$SRC" -c "$ROOT/tools/test_astc_ref.cpp" -o "$OUT/test_astc_ref.o"
+clang++ -std=c++20 -O2 $DEFS -I"$SRC" -c "$ROOT/tools/test_astc_ref.cpp" -o "$OUT/test_astc_ref.o"
 clang -std=c11 -O2 -Wall -Wextra -c "$ROOT/runtime/nvn/astc.c" -o "$OUT/astc.o"
 clang -std=c11 -O2 -Wall -c "$ROOT/tools/test_astc.c" -o "$OUT/test_astc.o"
 clang++ "$OUT/test_astc.o" "$OUT/astc.o" "$OUT/test_astc_ref.o" $LIB -o "$OUT/test_astc$EXE"

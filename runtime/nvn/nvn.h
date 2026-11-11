@@ -110,6 +110,7 @@ typedef struct {
     uint64_t callback, callback_data;
     bool recording;
     uint64_t guest;  // the guest NVNcommandBuffer*
+    uint64_t shadow_page, shadow_mem;  // (cmdbuf.c write_at) the shadow page its records last went to: no lookup per record
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
@@ -146,5 +147,9 @@ enum {
 void backend_init(void);
 void backend_execute(uint64_t handle);            // run a recorded command list
 void backend_present(NvnTexture *tex);            // show a texture in the window
+// The display's vsync for the frame pacer (vulkan/device.c): how much later (< 0: earlier) a frame handed over at t
+// (plat_now_ns) should go to be queued half a vsync before one, and the vsync period, ns. false: not known, or a grid
+// of `grid` ns is no whole number of vsyncs (no limit, 40 fps on 60 Hz): no phase to keep.
+bool backend_vsync_offset(uint64_t t, uint64_t grid, int64_t *off, uint64_t *period);
 void backend_texture_destroyed(NvnTexture *tex);
 void backend_pool_written(uint64_t addr, uint64_t size);

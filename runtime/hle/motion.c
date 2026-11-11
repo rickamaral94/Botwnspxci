@@ -12,6 +12,9 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef __ANDROID__
+#include <jni.h>
+#endif
 
 #include "../hle.h"
 #include "../settings.h"
@@ -100,10 +103,18 @@ static void add_sample(const float w[3], float dt) {
 }
 
 // SDL's frame (rad/s or m/s^2) in: angular velocity -> a sample, acceleration -> the way down
-static void feed(SDL_SensorType type, const float d[3], uint64_t ts) {
+// phone: the phone's own sensors (on the screen as it's turned: to_screen). Held upright they turn as a controller
+// lying flat would - the Switch's axes (x, -z, y) of the screen's; with Motion like the Switch's screen (#211, #247:
+// "tilting turns the aim, turning tilts it") they are the screen's own, as the console's in handheld mode. Gyroscope
+// and accelerometer alike: a rotation, so the way down stays with the turns.
+static void feed(SDL_SensorType type, const float d[3], uint64_t ts, bool phone) {
     pthread_mutex_lock(&m_lock);
+    bool flat = phone && g_settings.motion_flat;
+    static int last_flat = -1;  // (the frame changed in the menu: the attitude is levelled again from the way down)
+    if (phone && last_flat != flat) { if (last_flat >= 0) q_set = false; last_flat = flat; }
     if (type == SDL_SENSOR_ACCEL) {
-        m_accel[0] = -d[0] / 9.80665f, m_accel[1] = d[2] / 9.80665f, m_accel[2] = -d[1] / 9.80665f;
+        if (flat) m_accel[0] = -d[0] / 9.80665f, m_accel[1] = -d[1] / 9.80665f, m_accel[2] = -d[2] / 9.80665f;
+        else m_accel[0] = -d[0] / 9.80665f, m_accel[1] = d[2] / 9.80665f, m_accel[2] = -d[1] / 9.80665f;
         if (!q_set) level_from(m_accel);
     } else if (type == SDL_SENSOR_GYRO) {
         float dt = m_gyro_ts && ts > m_gyro_ts ? (float)((ts - m_gyro_ts) / 1e9) : 0.005f;
@@ -135,20 +146,75 @@ static void feed(SDL_SensorType type, const float d[3], uint64_t ts) {
             }
             for (int i = 0; i < 3; i++) g[i] -= bias[i];
         }
-        const float w[3] = {g[0], -g[2], g[1]};
+        const float w[3] = {g[0], flat ? g[1] : -g[2], flat ? g[2] : g[1]};
         add_sample(w, dt);
         m_live_ns = SDL_GetTicksNS();
     }
     pthread_mutex_unlock(&m_lock);
 }
 
-// The phone's sensors (device axes, portrait) on the screen as it's turned now
+#ifdef __ANDROID__
+// Display.getRotation() of the activity's display, through JNI: 0-3, or -1 if it can't be had
+static int android_rotation(void) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    if (!env) return -1;
+    if ((*env)->PushLocalFrame(env, 8) != 0) {
+        (*env)->ExceptionClear(env);
+        return -1;
+    }
+    int r = -1;
+    jobject act = (jobject)SDL_GetAndroidActivity();  // (a local reference: the frame's pop releases it)
+    jobject wm = NULL, disp = NULL;
+    jmethodID m = NULL;
+    if (act) m = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, act), "getWindowManager", "()Landroid/view/WindowManager;");
+    if (m && !(*env)->ExceptionCheck(env)) wm = (*env)->CallObjectMethod(env, act, m);
+    m = NULL;
+    if (wm && !(*env)->ExceptionCheck(env)) m = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, wm), "getDefaultDisplay", "()Landroid/view/Display;");
+    if (m && !(*env)->ExceptionCheck(env)) disp = (*env)->CallObjectMethod(env, wm, m);
+    m = NULL;
+    if (disp && !(*env)->ExceptionCheck(env)) m = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, disp), "getRotation", "()I");
+    if (m && !(*env)->ExceptionCheck(env)) r = (*env)->CallIntMethod(env, disp, m);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env), r = -1;
+    (*env)->PopLocalFrame(env, NULL);
+    return r >= 0 && r <= 3 ? r : -1;
+}
+#endif
+
+// The screen's turn from the display's natural orientation, in quarter turns counterclockwise (Display.getRotation()):
+// the turn that takes the sensors' axes - which follow the natural orientation - onto the screen's. Not SDL's display
+// orientation: SDL counts a quarter turn more on a display whose natural orientation is landscape (SDL_android.c
+// onNativeRotationChanged), and takes that natural orientation once, in SDLActivity.onCreate - the activity lives
+// through folding and unfolding (configChanges). On a foldable's inner screen, landscape by nature (Galaxy Z Fold 8,
+// Pixel Fold), rotation 0 read as LANDSCAPE and turned the motion a quarter too far: turning the phone tilted the aim.
+// Asked of Android at most every 250 ms (folding changes it with no event here); SDL's orientation only without JNI.
+static int screen_turns(void) {
+    static int turns = -1;
+    static uint64_t asked_ns;
+    uint64_t now = SDL_GetTicksNS();
+    if (turns >= 0 && now - asked_ns < 250000000ull) return turns;
+    asked_ns = now;
+    int r = -1;
+#ifdef __ANDROID__
+    r = android_rotation();
+#endif
+    if (r < 0) {
+        SDL_DisplayID d = SDL_GetPrimaryDisplay();
+        SDL_DisplayOrientation o = SDL_GetCurrentDisplayOrientation(d);
+        r = o == SDL_ORIENTATION_LANDSCAPE ? 1 : o == SDL_ORIENTATION_PORTRAIT_FLIPPED ? 2 : o == SDL_ORIENTATION_LANDSCAPE_FLIPPED ? 3 : 0;
+        if (SDL_GetNaturalDisplayOrientation(d) == SDL_ORIENTATION_LANDSCAPE) r = (r + 3) % 4;
+    }
+    if (r != turns) LOG("[motion] the screen is turned %d degrees from its natural orientation\n", r * 90);
+    turns = r;
+    return turns;
+}
+
+// The phone's sensors (device axes, as the display's natural orientation) on the screen as it's turned now
 static void to_screen(const float d[3], float s[3]) {
-    switch (SDL_GetCurrentDisplayOrientation(SDL_GetPrimaryDisplay())) {
-    case SDL_ORIENTATION_LANDSCAPE: s[0] = -d[1], s[1] = d[0]; break;          // (its right side up)
-    case SDL_ORIENTATION_LANDSCAPE_FLIPPED: s[0] = d[1], s[1] = -d[0]; break;  // (its left side up)
-    case SDL_ORIENTATION_PORTRAIT_FLIPPED: s[0] = -d[0], s[1] = -d[1]; break;
-    default: s[0] = d[0], s[1] = d[1]; break;
+    switch (screen_turns()) {
+    case 1: s[0] = -d[1], s[1] = d[0]; break;   // (a quarter counterclockwise: a portrait phone in landscape, its right side up)
+    case 3: s[0] = d[1], s[1] = -d[0]; break;   // (a quarter clockwise: its left side up)
+    case 2: s[0] = -d[0], s[1] = -d[1]; break;
+    default: s[0] = d[0], s[1] = d[1]; break;   // (as by nature: a foldable's landscape inner screen held normally too)
     }
     s[2] = d[2];
 }
@@ -178,6 +244,9 @@ void motion_open(void) {
 // A controller that has a gyroscope: its own sensors, in place of the phone's while it sends them
 void motion_pad_opened(SDL_Gamepad *g) {
     if (!SDL_GamepadHasSensor(g, SDL_SENSOR_GYRO)) return;
+    // (Motion sensor: Phone - the controller's left off: a USB-C controller the phone sits in, its sensors on, and the
+    // phone's aim stopped after a few shots until the controller was plugged in again, #78)
+    if (g_settings.motion_source == 1) { LOG("[motion] %s: its gyroscope left off (Phone)\n", SDL_GetGamepadName(g)); return; }
     SDL_SetGamepadSensorEnabled(g, SDL_SENSOR_GYRO, true);
     if (SDL_GamepadHasSensor(g, SDL_SENSOR_ACCEL)) SDL_SetGamepadSensorEnabled(g, SDL_SENSOR_ACCEL, true);
     LOG("[motion] %s: its gyroscope\n", SDL_GetGamepadName(g));
@@ -185,41 +254,76 @@ void motion_pad_opened(SDL_Gamepad *g) {
 
 void motion_event(const SDL_Event *e) {
     if (!g_settings.motion || ENV("LARECOMP_MOTION_TEST")) return;
+    // Settings > Controls > Motion sensor (settings.h motion_source): 1 the phone's alone - for a controller that reports
+    // a gyroscope it hasn't got, whose noise passed for a live one and muted the phone's (GameSir X2 Type-C, #115); 2 a
+    // controller's alone, taken as it comes; 0 the automatic switch below.
+    int source = g_settings.motion_source;
     if (e->type == SDL_EVENT_SENSOR_UPDATE) {
-        if (SDL_GetTicksNS() < pad_until_ns) return;
+        if (source == 2 || (source == 0 && SDL_GetTicksNS() < pad_until_ns)) return;
         float s[3];
+        SDL_SensorType type = SDL_GetSensorTypeForID(e->sensor.which);
         to_screen(e->sensor.data, s);
-        feed(SDL_GetSensorTypeForID(e->sensor.which), s, e->sensor.sensor_timestamp ? e->sensor.sensor_timestamp : SDL_GetTicksNS());
+        {   // Turning the phone round (landscape to the other landscape): the screen's axes flip part way, when Android
+            // turns the game, and what the sensors read on the way (the hand's tilt, the way down sweeping round) went into
+            // the attitude in one frame before and the other after - the aim further up with each turn. Held against the
+            // screen, the phone is as it was before the half turn: while it turns fast about the screen's normal (over ~115
+            // deg/s) and for 0.4 s after the screen turned, its readings are left out - the attitude kept as it was.
+            static uint64_t quiet_until;
+            static int last_turns = -1;
+            uint64_t now = SDL_GetTicksNS();
+            int t = screen_turns();
+            if (last_turns >= 0 && t != last_turns) quiet_until = now + 400000000ull;
+            last_turns = t;
+            if (type == SDL_SENSOR_GYRO && fabsf(s[2]) > 2.0f) quiet_until = now + 250000000ull;
+            if (now < quiet_until) return;
+        }
+        feed(type, s, e->sensor.sensor_timestamp ? e->sensor.sensor_timestamp : SDL_GetTicksNS(), true);
     } else if (e->type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE) {
-        // A controller's sensors replace the phone's only once its gyroscope has moved for a quarter of a second: some
-        // report one that never does (a USB-C controller the phone sits in, GameSir X5 Lite: issue #78), and its zeros
-        // held the phone's off. One reading over a threshold wasn't enough: with that controller motion worked for
-        // the first aim and then stopped for good (a stray reading, then its zeros). And back to the phone's once the
-        // controller's gyroscope has read exactly zero for 2 s: a real one is never that still.
-        static bool pad_live;
-        static uint64_t moving_ns, zero_ns;
+        if (source == 1) return;
+        if (source == 2) {
+            feed((SDL_SensorType)e->gsensor.sensor, e->gsensor.data,
+                 e->gsensor.sensor_timestamp ? e->gsensor.sensor_timestamp : SDL_GetTicksNS(), false);
+            return;
+        }
+        // A controller's sensors replace the phone's only once its gyroscope is alive: some report one that never is (a
+        // USB-C controller the phone sits in, GameSir X5 Lite: issue #78), and its zeros held the phone's off. Alive is
+        // readings that change from one to the next - a real gyroscope's noise does even lying still - 20 in a row:
+        // one stray reading switched to that controller for good (0.2.3), and a speed threshold (0.2.4) never let a
+        // slow aim or a resting controller take over (#78, #115). Back to the phone's after 2 s of readings that are
+        // zero or repeat: a dead or frozen sensor. And a turn first: some controllers with no gyroscope send noise that
+        // changes (GameSir X2 Type-C, #115, #137) - once a reading of 0.5 rad/s (~30 deg/s: a hand turning it, more
+        // than any noise) has come, that controller's changing readings are a gyroscope.
+        static bool pad_live, pad_turned;
+        static int changing;
+        static float last[3];
+        static uint64_t dead_ns;
         if ((SDL_SensorType)e->gsensor.sensor == SDL_SENSOR_GYRO) {
             const float *g = e->gsensor.data;
-            float mag = fabsf(g[0]) + fabsf(g[1]) + fabsf(g[2]);
+            bool alive = (g[0] != 0.0f || g[1] != 0.0f || g[2] != 0.0f) &&
+                         (g[0] != last[0] || g[1] != last[1] || g[2] != last[2]);
+            memcpy(last, g, sizeof last);
             uint64_t now = SDL_GetTicksNS();
+            if (!pad_turned && g[0] * g[0] + g[1] * g[1] + g[2] * g[2] > 0.25f) {
+                pad_turned = true;
+                LOG("[motion] the controller's gyroscope turned (%.2f %.2f %.2f rad/s)\n", g[0], g[1], g[2]);
+            }
             if (!pad_live) {
-                if (mag <= 0.05f) moving_ns = 0;
-                else if (!moving_ns) moving_ns = now;
-                else if (now - moving_ns > 250000000) {
-                    pad_live = true, zero_ns = 0;
-                    LOG("[motion] the controller's gyroscope moves: its sensors in place of the phone's\n");
+                changing = alive ? changing + 1 : 0;
+                if (changing >= 20 && pad_turned) {
+                    pad_live = true, dead_ns = 0;
+                    LOG("[motion] the controller's gyroscope is alive: its sensors in place of the phone's\n");
                 }
-            } else if (mag != 0.0f) zero_ns = 0;
-            else if (!zero_ns) zero_ns = now;
-            else if (now - zero_ns > 2000000000) {
-                pad_live = false, moving_ns = 0, pad_until_ns = 0;
-                LOG("[motion] the controller's gyroscope reads zero: the phone's sensors again\n");
+            } else if (alive) dead_ns = 0;
+            else if (!dead_ns) dead_ns = now;
+            else if (now - dead_ns > 2000000000) {
+                pad_live = false, changing = 0, pad_until_ns = 0;
+                LOG("[motion] the controller's gyroscope reads zero or the same: the phone's sensors again\n");
             }
         }
         if (!pad_live) return;
         pad_until_ns = SDL_GetTicksNS() + 500000000;
         feed((SDL_SensorType)e->gsensor.sensor, e->gsensor.data,
-             e->gsensor.sensor_timestamp ? e->gsensor.sensor_timestamp : SDL_GetTicksNS());
+             e->gsensor.sensor_timestamp ? e->gsensor.sensor_timestamp : SDL_GetTicksNS(), false);
     }
 }
 
@@ -281,6 +385,18 @@ HLE_FUNC("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19
     uint64_t now = SDL_GetTicksNS();
     pthread_mutex_lock(&m_lock);
     if (!g_settings.motion || ENV("LARECOMP_MOTION_TEST") || now - m_live_ns > 250000000) own_sample(now);
+    {   // (the log: a sensor that stops sending while the game reads it - aiming that stops working, #78)
+        static bool quiet;
+        static int nlog;
+        bool q = g_settings.motion && m_live_ns && now - m_live_ns > 1000000000;
+        if (q != quiet && nlog < 40) {
+            nlog++;
+            LOG(q ? "[motion] no gyroscope readings for 1 s while the game reads the sensor (%s)\n"
+                  : "[motion] gyroscope readings again (%s)\n",
+                g_settings.motion_source == 1 ? "Phone" : g_settings.motion_source == 2 ? "Controller" : "Auto");
+        }
+        quiet = q;
+    }
     if (n > ring_n) n = ring_n;
     if (n < 0) n = 0;
     for (int i = 0; i < n; i++) out[i] = ring[(ring_head - i + RING) % RING];

@@ -459,6 +459,25 @@ const char *romfs_file_at(uint64_t off) {
     return NULL;
 }
 
+// A file of the game's RomFS (its path as the index has it: "UI/StockItem/Weapon_Sword_070.sbitemico"), whole, in a
+// malloc'd buffer - mods included. For the app's own use (ui/touch_icons.mm: the touch controls' item icons). NULL
+// until the game has opened its RomFS, or when the path isn't there.
+uint8_t *fs_romfs_read(const char *path, size_t *size) {
+    if (romfs_fd == -1) return NULL;
+    RomImage *was = R;
+    R = &img_game;
+    uint8_t *out = NULL;
+    for (int i = 0; i < rom_nfiles; i++) {
+        if (strcmp(rom_files[i].path, path)) continue;
+        out = malloc(rom_files[i].size ? rom_files[i].size : 1);
+        if (romfs_read(romfs_fd, out, rom_files[i].size, rom_files[i].off) != (ssize_t)rom_files[i].size) free(out), out = NULL;
+        else *size = rom_files[i].size;
+        break;
+    }
+    R = was;
+    return out;
+}
+
 // ------------------------------------------------------------------ IStorage (raw RomFS image)
 typedef struct { int fd; uint64_t size; bool plain; RomImage *img; } Storage;  // plain: no mod overlay; img: the game's or the DLC's
 
@@ -496,7 +515,9 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
 }
 
 static Service *open_romfs_storage(void) {
-    if (romfs_fd == -1 && g_romfs_link) {  // the player's own romfs/ folder, in place
+    struct stat lst;
+    bool link_file = g_romfs_link && stat(g_romfs_link, &lst) == 0 && S_ISREG(lst.st_mode);  // (their own romfs.bin)
+    if (romfs_fd == -1 && g_romfs_link && !link_file) {  // the player's own romfs/ folder, in place
         if (!romfs_virt) {
             uint64_t t0 = plat_now_ns();
             char why[256];
@@ -513,8 +534,10 @@ static Service *open_romfs_storage(void) {
     }
     if (romfs_fd == -1) {  // (not VIRT_FD)
         char path[1024];
-        snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // extracted/romfs.bin
+        if (link_file) snprintf(path, sizeof path, "%s", g_romfs_link);  // the player's romfs.bin, in place
+        else snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // extracted/romfs.bin
         romfs_fd = open(path, O_RDONLY);
+        if (link_file) LOG("[fs] game data from %s in place\n", path);
         if (romfs_fd < 0) FATAL("cannot open %s (set up the game files on the start screen)\n", path);
         char why[128];
         if (!romfs_image_ok(path, why, sizeof why))  // (else the game's SDK aborts on it with an svcBreak, nothing said)
@@ -755,7 +778,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
 
 // A copy of folder src at dst (made by this process, so its files are this app's: on Android, files adb copied belong
 // to the shell user, and the game couldn't open them for writing - result 2/4000)
-static void copy_tree(const char *src, const char *dst) {
+void copy_tree(const char *src, const char *dst) {
     DIR *d = opendir(src);
     if (!d) return;
     mkdir(dst, 0755);

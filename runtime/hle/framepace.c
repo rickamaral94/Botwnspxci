@@ -104,14 +104,19 @@ bool diag_in_gameplay(void) {
     return !in_menu() && !in_event() && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) <= 0;
 }
 
+bool framepace_in_event(void) { return g_game_version >= 182 && in_event(); }  // (hle/benchmark.c)
+
 int framepace_target(void) {
     static int forced = -2, movie = -2, menu = -2, event = -2;
     if (forced == -2) forced = env_int("LARECOMP_FPS", -1);
     if (movie == -2) movie = env_int("LARECOMP_MOVIE_FPS", 30);
     if (menu == -2) menu = env_int("LARECOMP_MENU_FPS", 30);
     if (event == -2) event = env_int("LARECOMP_EVENT_FPS", -1);  // (-1: the setting - Cutscenes at 60 fps, else 30)
-    // (Video > Frame rate: 30, 60; Auto is 60 here - the clock follows whatever the frames really take)
-    int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 : 60;
+    // (Video > Frame rate: 20, 30, 40 / 45, 60; Auto is 60 here - the clock follows whatever the frames really take.
+    // 40 / 45: whichever the screen shows evenly, vulkan/device.c vk_between_fps - the game in its 60 fps way)
+    extern int vk_between_fps(void);
+    int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 : g_settings.fps_mode == 3 ? 20
+            : g_settings.fps_mode == 4 ? vk_between_fps() : 60;
 #ifdef __ANDROID__
     {   // Video > Frame generation: the game at the multiplier's base (30 or 40), generated frames between (nvn/vulkan/framegen.c)
         extern int fg_base_fps(void);
@@ -171,7 +176,15 @@ void framepace_presented(uint64_t t, bool on_grid) {
 #define VFR_INTERVAL 0x34
 #define VFR_RATIO 0x3c
 
+// The clock's interval (1 / 2 / 3: its 60 / 30 / 20 fps ways), as last set: the frame loop's follows it at 3
+// (nvn/objects.c nvnWindowSetPresentInterval)
+static uint32_t g_vfr_iv = 2;
+uint32_t framepace_interval(void) { return g_vfr_iv; }
+
 void rt_vfr_update(uint64_t vfr) {
+    extern bool g_benchmark;
+    extern void benchmark_vfr(void);
+    if (g_benchmark) benchmark_vfr();  // (its held time and weather)
     if (!framepace_on()) return;
     static uint64_t last_t;
     static double real, given;  // seconds of real time and of game time handed out (only their gap matters)
@@ -199,6 +212,14 @@ void rt_vfr_update(uint64_t vfr) {
         int target = framepace_target();
         if (target != last_target) smooth = period, last_step = 0;  // (a new pace: start from it)
         last_target = target;
+        // Frame rate changed in the menu: the interval goes to the new one at once - its average took dozens of frames,
+        // the frame loop's interval (nvn/objects.c, following this one) and the clock's ratio not matching meanwhile,
+        // and Link sank into the ground going from 20 to 30 fps (2026-11-02)
+        static int last_mode = -1;
+        if (g_settings.fps_mode != last_mode) {
+            if (last_mode >= 0) slow = period * 30;
+            last_mode = g_settings.fps_mode;
+        }
         smooth += (s - smooth) * 0.05;
         real += s;
         // The step changes slowly: the game reads some deltas a frame late, and a step that jumps between frames
@@ -221,8 +242,11 @@ void rt_vfr_update(uint64_t vfr) {
     // The interval switches some of the game's code between its 60 fps and 30 fps ways: only on a lasting change of
     // the frame rate, never back and forth from one frame to the next.
     slow += (ratio - slow) * 0.05;
-    static uint32_t iv = 2;
-    if (iv == 1 && slow > 0.85) iv = 2;
+    uint32_t iv = g_vfr_iv;
+    // (Frame rate 40 / 45: the game's 60 fps way, interval 1, whatever the ratio - at 40 (0.75) the rule below kept 2
+    // while the frame loop ran at 1 (nvn/objects.c), the mismatch that sank Link at 20 fps)
+    if (g_settings.fps_mode == 4) iv = 1, slow = ratio;
+    else if (iv == 1 && slow > 0.85) iv = 2;
     else if (iv == 2 && slow < 0.7) iv = 1;
     else if (iv == 2 && slow > 1.3) iv = 3;
     else if (iv == 3 && slow < 1.15) iv = 2;
@@ -230,7 +254,7 @@ void rt_vfr_update(uint64_t vfr) {
     VF(float, vfr, VFR_NEW_RATIO) = ratio;
     VF(uint32_t, vfr, VFR_INTERVAL) = iv;
     VF(uint8_t, vfr, VFR_CHANGED) = last_iv && iv != last_iv;
-    last_iv = iv;
+    last_iv = g_vfr_iv = iv;
     if (log_every > 0 && nframe++ % (uint64_t)log_every == 0)
         LOG("[framepace] target %d fps, %.2f ms since the last update (avg %.2f), ratio %.3f, interval %u, owed "
             "%.2f ms%s%s\n", framepace_target(), s * 1e3, smooth * 1e3, ratio, iv, (real - given) * 1e3,

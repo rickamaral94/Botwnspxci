@@ -15,7 +15,7 @@
 #define SETTINGS_FILE settings_file()
 
 // LARECOMP_SETTINGS=<path>: another settings file (test runs never touch the player's larecomp.ini)
-static const char *settings_file(void) {
+const char *settings_file(void) {
     const char *e = getenv("LARECOMP_SETTINGS");
     if (e && *e) return e;
     static int moved;  // (the project's former name: the player's settings carry over, once)
@@ -41,9 +41,16 @@ Settings g_settings = {
     .overlay_pos = {-1, -1},
     .touch_pos = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
                   {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}},
+    .touch_scheme = 1,
+    .touch_pos2 = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
+                   {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
+                   {-1, -1}, {-1, -1}, {-1, -1}},
     .touch_scale = 1.0f,
     .touch_opacity = 1.0f,
     .touch_drag_sens = 1.0f,
+    .touch_aim_sens = 1.0f,
+    .touch_talk = true,
+    .touch_minimap_top = true,
     .gpu_heap = -1,
     .inplace_reads = -1,
     .turnip_lrz = -1,
@@ -79,11 +86,14 @@ Settings g_settings = {
 // SavageWindRecomp); the older versions are told English instead.
 // Chinese is zh-Hans / zh-Hant, as GetDesiredLanguage answers since system 4.0 (and Eden): the older zh-CN / zh-TW
 // gave Japanese text (issue #15).
+// "es" / "fr" give Spain's and France's text (regionEU); Latin America's Spanish and Canada's French are the region US
+// ones (Pack/Bootup_USes.pack, Bootup_USfr.pack, in every version), told as es-419 / fr-CA (issue #128).
 const char *const g_language_codes[N_LANGUAGES] = {"auto", "ja", "en-US", "es", "fr", "de", "it", "nl", "ru", "ko",
-                                                   "zh-Hans", "zh-Hant", "pt-BR"};
+                                                   "zh-Hans", "zh-Hant", "pt-BR", "es-419", "fr-CA"};
 const char *const g_language_names[N_LANGUAGES] = {"Auto", "Japanese", "English", "Spanish", "French", "German",
                                                    "Italian", "Dutch", "Russian", "Korean", "Chinese (Simplified)",
-                                                   "Chinese (Traditional)", "Portuguese (Brazil)"};
+                                                   "Chinese (Traditional)", "Portuguese (Brazil)",
+                                                   "Spanish (Latin America)", "French (Canada)"};
 
 // The app's own menus (ui/i18n.mm): the game's Language when one is chosen - one setting for both, read once (the menus
 // change when the app starts again) - else the phone's first preferred language, which is the app's own when Android
@@ -97,7 +107,7 @@ const char *settings_menu_language(void) {
         int chosen = g_settings.language;
         if (!(e && *e) && chosen > LANG_AUTO && chosen < N_LANGUAGES) {
             static const char *const menu[N_LANGUAGES] = {"en", "ja", "en", "es", "fr", "de", "it", "nl", "ru", "ko",
-                                                          "zh-Hans", "zh-Hant", "pt"};  // (g_language_codes' order)
+                                                          "zh-Hans", "zh-Hant", "pt", "es", "fr"};  // (g_language_codes' order)
             return lang = menu[chosen];
         }
         if (e && *e) {
@@ -160,8 +170,16 @@ static const char *host_language(void) {
     char l[8] = {0};
     size_t n = 0;
     for (const char *p = e; *p && *p != '.' && *p != '@' && *p != '_' && *p != '-' && n < sizeof l - 1; p++) l[n++] = *p;
+    // (the country after the language: "es-MX", "es_AR.UTF-8", "es-419")
+    char country[8] = {0};
+    const char *sep = e + n;
+    if (*sep == '_' || *sep == '-')
+        for (size_t k = 0; sep[k + 1] && sep[k + 1] != '.' && sep[k + 1] != '@' && sep[k + 1] != '-' && k < sizeof country - 1; k++)
+            country[k] = sep[k + 1];
+    if (!strcmp(l, "es")) return country[0] && strcmp(country, "ES") ? "es-419" : "es";  // (Spain's, else the Americas')
+    if (!strcmp(l, "fr")) return !strcmp(country, "CA") ? "fr-CA" : "fr";
     static const struct { const char *loc, *code; } map[] = {{"ja", "ja"}, {"ko", "ko"}, {"ru", "ru"}, {"nl", "nl"},
-                                                             {"de", "de"}, {"it", "it"}, {"fr", "fr"}, {"es", "es"}};
+                                                             {"de", "de"}, {"it", "it"}};
     for (size_t i = 0; i < sizeof map / sizeof *map; i++)
         if (!strcmp(l, map[i].loc)) return map[i].code;
     if (!strcmp(l, "zh"))  // (TW / HK, Hant: traditional)
@@ -202,6 +220,8 @@ void settings_reset_defaults(void) {
     g_settings.movie_audio = d->movie_audio;
     g_settings.show_fps = d->show_fps;
     g_settings.motion = d->motion;
+    g_settings.motion_source = d->motion_source;
+    g_settings.motion_flat = d->motion_flat;
 #ifdef __ANDROID__
     g_settings.touch_controls = d->touch_controls;
     g_settings.overlay_style = d->overlay_style;
@@ -238,10 +258,10 @@ void settings_load(void) {
         char key[64];
 #ifdef __ANDROID__
         char val[512] = "";  // (a key with nothing after "=": mods_off when every mod is on)
-        if (sscanf(line, " %63[^= ] = %511[^\n]", key, val) < 1) continue;
+        if (sscanf(line, " %63[^= ] = %511[^\r\n]", key, val) < 1) continue; val[strcspn(val, "\r\n")] = 0;
 #else
         char val[128] = "";
-        if (sscanf(line, " %63[^= ] = %127[^\n]", key, val) < 1) continue;
+        if (sscanf(line, " %63[^= ] = %127[^\r\n]", key, val) < 1) continue; val[strcspn(val, "\r\n")] = 0;
 #endif
         if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "original") ? ASPECT_ORIGINAL : ASPECT_UNLOCKED;
         else if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
@@ -250,6 +270,8 @@ void settings_load(void) {
         else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
         else if (!strcmp(key, "motion")) g_settings.motion = atoi(val) != 0;
+        else if (!strcmp(key, "motion_source")) g_settings.motion_source = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
+        else if (!strcmp(key, "motion_flat")) g_settings.motion_flat = atoi(val) != 0;
 #ifdef __ANDROID__
         else if (!strcmp(key, "overlay")) g_settings.overlay_style = !strcmp(val, "compact");
         else if (!strcmp(key, "overlay_pos")) sscanf(val, "%f,%f", &g_settings.overlay_pos[0], &g_settings.overlay_pos[1]);
@@ -264,7 +286,7 @@ void settings_load(void) {
         else if (!strcmp(key, "framegen_multiplier")) g_settings.fg_mult = atoi(val) == 3 ? 1 : atoi(val) == 4 ? 2 : 0;
         else if (!strcmp(key, "cbuf_inplace")) g_settings.cbuf_inplace = atoi(val) != 0;
         else if (!strcmp(key, "gcopy_range")) g_settings.gcopy_range = atoi(val) != 0;
-        else if (!strcmp(key, "frame_rate")) g_settings.fps_mode = !strcmp(val, "30") ? 1 : !strcmp(val, "60") ? 2 : 0;
+        else if (!strcmp(key, "frame_rate")) g_settings.fps_mode = !strcmp(val, "30") ? 1 : !strcmp(val, "60") ? 2 : !strcmp(val, "20") ? 3 : !strcmp(val, "45") ? 4 : 0;
         else if (!strcmp(key, "shader_int32")) g_settings.shader_int32 = atoi(val) != 0;
         else if (!strcmp(key, "sync_lag")) g_settings.sync_lag = atoi(val) != 0;
         else if (!strcmp(key, "native_code")) g_settings.native_code = atoi(val) != 0;
@@ -274,6 +296,8 @@ void settings_load(void) {
         else if (!strcmp(key, "turnip_lrz")) g_settings.turnip_lrz = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "log_file")) g_settings.log_file = atoi(val) != 0;
         else if (!strcmp(key, "gpu_model")) snprintf(g_settings.gpu_model, sizeof g_settings.gpu_model, "%s", val);
+        else if (!strcmp(key, "driver_env")) snprintf(g_settings.driver_env, sizeof g_settings.driver_env, "%s", val);
+        else if (!strcmp(key, "heap_file")) g_settings.heap_file = atoi(val) != 0;
         else if (!strcmp(key, "touch_scale")) g_settings.touch_scale = (float)atof(val);
         else if (!strcmp(key, "touch_opacity")) g_settings.touch_opacity = (float)atof(val);
         else if (!strcmp(key, "touch_drag_camera")) g_settings.touch_drag_camera = atoi(val) != 0;
@@ -285,6 +309,27 @@ void settings_load(void) {
             char *q = val;
             for (int i = 0; i < TOUCH_NCTL * 2 && *q; i++) {
                 g_settings.touch_pos[i / 2][i % 2] = strtof(q, &q);
+                while (*q == ',' || *q == ' ') q++;
+            }
+        }
+        else if (!strcmp(key, "touch_scheme")) g_settings.touch_scheme = atoi(val);
+        else if (!strcmp(key, "touch_aim_sens")) g_settings.touch_aim_sens = (float)atof(val);
+        else if (!strcmp(key, "touch_talk")) g_settings.touch_talk = atoi(val) != 0;
+        else if (!strcmp(key, "touch_minimap_top")) g_settings.touch_minimap_top = atoi(val) != 0;
+        else if (!strcmp(key, "touch_sizes") || !strcmp(key, "touch_icons_sizes")) {  // (a size per control)
+            bool two = key[6] == 'i';
+            float *s = two ? g_settings.touch_size2 : g_settings.touch_size;
+            int n = two ? TOUCH_NCTL2 : TOUCH_NCTL;
+            char *q = val;
+            for (int i = 0; i < n && *q; i++) {
+                s[i] = strtof(q, &q);
+                while (*q == ',' || *q == ' ') q++;
+            }
+        }
+        else if (!strcmp(key, "touch_icons_layout")) {  // (the icon layout's: as touch_layout)
+            char *q = val;
+            for (int i = 0; i < TOUCH_NCTL2 * 2 && *q; i++) {
+                g_settings.touch_pos2[i / 2][i % 2] = strtof(q, &q);
                 while (*q == ',' || *q == ' ') q++;
             }
         }
@@ -340,14 +385,16 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
-    fprintf(f, "motion = %d\n", g_settings.motion);
+    fprintf(f, "motion = %d\nmotion_source = %d\nmotion_flat = %d\n", g_settings.motion, g_settings.motion_source,
+            g_settings.motion_flat);
 #ifdef __ANDROID__
     fprintf(f, "overlay = %s\n", g_settings.overlay_style == 1 ? "compact" : "full");
     fprintf(f, "overlay_pos = %.4f,%.4f\n", g_settings.overlay_pos[0], g_settings.overlay_pos[1]);
 #endif
 #ifdef __ANDROID__
     fprintf(f, "touch_controls = %d\n", g_settings.touch_controls);
-    fprintf(f, "frame_rate = %s\n", g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : "auto");
+    fprintf(f, "frame_rate = %s\n", g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : g_settings.fps_mode == 3 ? "20" :
+               g_settings.fps_mode == 4 ? "45" : "auto");
     fprintf(f, "cutscenes_60 = %d\n", g_settings.event_fps_unlock);
     fprintf(f, "framegen = %d\nframegen_flow = %d\nframegen_performance = %d\nframegen_multiplier = %d\nframegen_hud_mask = %d\n"
             "cbuf_inplace = %d\n", g_settings.framegen, g_settings.fg_flow, g_settings.fg_performance, g_settings.fg_mult + 2,
@@ -359,14 +406,24 @@ void settings_save(void) {
 #define TRI(v) tri[(v) < 0 ? 0 : (v) ? 2 : 1]
     fprintf(f, "gpu_heap = %s\ninplace_reads = %s\nturnip_lrz = %s\nlog_file = %d\ngpu_model = %s\n", TRI(g_settings.gpu_heap),
             TRI(g_settings.inplace_reads), TRI(g_settings.turnip_lrz), g_settings.log_file, g_settings.gpu_model);
+    fprintf(f, "driver_env = %s\nheap_file = %d\n", g_settings.driver_env, g_settings.heap_file);
 #undef TRI
     fprintf(f, "touch_drag_camera = %d\ntouch_drag_sens = %.2f\ntouch_sticks_hidden = %d\ntouch_half_areas = %d\n",
             g_settings.touch_drag_camera, g_settings.touch_drag_sens, g_settings.touch_sticks_hidden,
             g_settings.touch_half_areas);
+    fprintf(f, "touch_minimap_top = %d\n", g_settings.touch_minimap_top ? 1 : 0);
     fprintf(f, "stick_deadzone = %.2f\n", g_settings.stick_deadzone);
     fprintf(f, "touch_scale = %.2f\ntouch_opacity = %.2f\ntouch_layout = ", g_settings.touch_scale, g_settings.touch_opacity);
     for (int i = 0; i < TOUCH_NCTL; i++)
         fprintf(f, "%s%.4f,%.4f", i ? "," : "", g_settings.touch_pos[i][0], g_settings.touch_pos[i][1]);
+    fprintf(f, "\ntouch_scheme = %d\ntouch_aim_sens = %.2f\ntouch_talk = %d\ntouch_icons_layout = ", g_settings.touch_scheme,
+            g_settings.touch_aim_sens, g_settings.touch_talk ? 1 : 0);
+    for (int i = 0; i < TOUCH_NCTL2; i++)
+        fprintf(f, "%s%.4f,%.4f", i ? "," : "", g_settings.touch_pos2[i][0], g_settings.touch_pos2[i][1]);
+    fprintf(f, "\ntouch_sizes = ");
+    for (int i = 0; i < TOUCH_NCTL; i++) fprintf(f, "%s%.2f", i ? "," : "", g_settings.touch_size[i]);
+    fprintf(f, "\ntouch_icons_sizes = ");
+    for (int i = 0; i < TOUCH_NCTL2; i++) fprintf(f, "%s%.2f", i ? "," : "", g_settings.touch_size2[i]);
     fprintf(f, "\n");
 #endif
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" :
