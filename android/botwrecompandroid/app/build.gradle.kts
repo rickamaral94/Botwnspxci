@@ -8,9 +8,13 @@ plugins {
 val repo: File = rootDir.resolve("../..").canonicalFile
 val deps: File = repo.resolve("android/deps/out")  // android/deps/build_deps.sh
 val gen = layout.buildDirectory.dir("generated/botwrecompandroid")
-// The release key: outside the repository, in ~/.botwrecompandroid/keystore.properties (storeFile, storePassword, keyAlias,
-// keyPassword); without it, release builds are signed with the debug key
+// The release key stays outside the repository in ~/.botwrecompandroid/keystore.properties (storeFile, storePassword,
+// keyAlias, keyPassword). Release builds must never fall back to an environment-specific debug key.
 val releaseKey: File = File(System.getProperty("user.home"), ".botwrecompandroid/keystore.properties")
+val releaseRequested = gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }
+if (releaseRequested && !releaseKey.exists()) {
+    throw GradleException("BOTW release signing key is missing: restore ~/.botwrecompandroid/keystore.properties")
+}
 
 android {
     namespace = "com.botwrecompandroid"
@@ -75,7 +79,7 @@ android {
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 

@@ -49,8 +49,10 @@ The upstream frame pacing runs first; the frame-generation base-FPS clamp is app
 - Android ARM64 dependency build: SDL3, shaderc, FFmpeg, Capstone, Unicorn, LZ4, Python and Zig passed.
 - Gradle `assembleRelease`: passed, including native C/C++, LSFG, Java/Dex, resources and `lintVital`.
 - APK: ZIP integrity passed; only `lib/arm64-v8a`; package `com.botwrecomp.android`; `versionCode 39`; `versionName 0.3.4-beta-amaral.1`.
-- Candidate APK SHA-256: `bb42a824d62488575a6eccb648cb6b1fc2095688b8ad50f0b8eaccbc0a1680df`.
-- The legitimate release keystore was not present in the repository, workspace or Library search. Gradle therefore used its documented debug fallback. Its certificate SHA-256 (`4ba608a4814ec9465291aa371a8fbf4cc7a0e6e6442f533f59e2d7a8c24abccb`) differs from the previous APK (`930841f5756d9d8716ae5e0de03cd55a871debf5959a30865f935b16a2488223`), so this candidate cannot update that installation.
+- Final Amaral.1 APK SHA-256: `03d96a6cbb1b6e6f3d543bba10c3442883b962a9717559e89754f66586250ab0`.
+- The final artifact uses the permanent RSA 4096 BOTWDroid Amaral key. Certificate SHA-256: `bef64ef9aab3164036dfb4d42118ae41cbb198cb89a538bc68123bce09448bd8`; see `docs/SIGNING-AMARAL.md`.
+- The final APK passed APK Signature Scheme v3 verification, ZIP integrity, alignment, package/version inspection and the `arm64-v8a`-only ABI check.
+- APKs installed from earlier test builds have different certificates and require one migration reinstall. Future releases must use this permanent key and increment `versionCode`.
 
 ## Device validation still required
 
