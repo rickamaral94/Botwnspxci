@@ -15,6 +15,10 @@ It is built on the engine of **[LAS Recomp](https://github.com/peiikai/LASRecomp
 > [0.2.3-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.2.3-beta) and the
 > [development notes](docs/BOTW-PORT.md) (in Portuguese).
 
+## Test logs
+
+See the [test log](docs/logs/README.md) for Android test results, evidence, conclusions and pending checks. The records are in Portuguese.
+
 ## Supported platform
 
 Android is the only application target. Desktop ports and packaging were discontinued on 2026-10-22.
