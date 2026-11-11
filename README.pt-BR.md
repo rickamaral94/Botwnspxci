@@ -21,6 +21,10 @@ O projeto parte do motor do **[LAS Recomp](https://github.com/peiikai/LASRecomp)
 > [notas da 0.3.4-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.3.4-beta) e as
 > [notas de desenvolvimento](docs/BOTW-PORT.md).
 
+## Logs de testes
+
+Consulte o [histórico de testes](docs/logs/README.md) para ver o que foi avaliado no Android, as evidências, as conclusões e os testes pendentes.
+
 ## Plataforma suportada
 
 Android é o único alvo do aplicativo. Os ports e pacotes desktop foram descontinuados em 2026-10-22.

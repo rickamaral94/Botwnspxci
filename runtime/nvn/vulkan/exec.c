@@ -1,4 +1,5 @@
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
+#include <SDL3/SDL_atomic.h>
 #include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_timer.h>
 #include <ctype.h>
@@ -1317,11 +1318,27 @@ static void run_job(void (*fn)(void *), void *arg) {
 // each layer drawn once from the one before - the first draw of that shader skipped left layer 3 and all after it
 // empty: no ground on the plateau). Draws into arrays, cubemaps, 3D textures and mipmapped targets wait for their
 // shader and pipeline instead (LARECOMP_WAIT_PERSISTENT=0: skip them like the rest).
-static uint64_t stat_build_wait_ns;
+static uint64_t stat_build_wait_ns, stat_build_wait_count, stat_build_wait_spin_count;
+static uint64_t build_wait_spin_ns(void) {
+    // A short, opt-in spin on Android. The shader worker and the renderer share the CPU budget.
+    static int spin = -1;
+    if (spin < 0) {
+        const char *setting = getenv("LARECOMP_PIPELINE_WAIT_SPIN");
+        spin = setting && strcmp(setting, "1") == 0;
+    }
+    return spin ? 200000 : 0;
+}
 static void wait_built(_Atomic int *state) {
     if (atomic_load(state)) return;
     uint64_t t0 = plat_now_ns();
-    while (!atomic_load(state)) usleep(200);
+    uint64_t spin_ns = build_wait_spin_ns();
+    int ready = 0;
+    if (spin_ns) {
+        while (!(ready = atomic_load(state)) && plat_now_ns() - t0 < spin_ns) SDL_CPUPauseInstruction();
+        if (ready) stat_build_wait_spin_count++;
+    }
+    if (!ready) while (!atomic_load(state)) usleep(200);
+    stat_build_wait_count++;
     stat_build_wait_ns += plat_now_ns() - t0;
 }
 static bool rt_is_persistent(NvnTexture *t) {
@@ -1443,6 +1460,10 @@ const char *renderer_stats(void) {
     LOG("[guest-copy-diag] mode=%d copied=%.2fMB reused=%.2fMB grow_saved=%.2fMB tail_appends=%llu; same renderer interval\n",
         gcopy_range_mode > 0, gcopy_copied / 1048576.0, gcopy_reused / 1048576.0,
         gcopy_grow_saved / 1048576.0, (unsigned long long)gcopy_grow_appends);
+    LOG("[pipeline-wait-diag] spin_us=%llu waits=%llu ready_while_spinning=%llu wait_ms=%.3f\n",
+        (unsigned long long)(build_wait_spin_ns() / 1000), (unsigned long long)stat_build_wait_count,
+        (unsigned long long)stat_build_wait_spin_count, (double)stat_build_wait_ns / 1e6);
+    stat_build_wait_count = stat_build_wait_spin_count = 0;
     gcopy_copied = gcopy_reused = gcopy_grow_saved = gcopy_grow_appends = 0;
     stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
@@ -5102,12 +5123,27 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
 // the lighting's draws read the light count, next to a light list a compute dispatch writes, without having the list
 // bound (~950k reads a frame, all zero: a dark scene). The shaders record such misses (gmiss, at the arena's end); a
 // miss inside a resident range makes that range part of every table from then on, pointing at its slot.
-#define GL_MAX 16
+#define GL_LEGACY_MAX 16
+#define GL_MAX 48
 static GcRange gl_learned[GL_MAX];
 static int gl_n;
 
 static void gres_learn(uint32_t off) {
-    for (int i = 0; i < gl_n; i++) if (gl_learned[i].lo <= off && off < gl_learned[i].hi) return;
+    static int limit;
+    if (!limit) {
+        const char *legacy = getenv("LARECOMP_GRES_LEGACY");
+        limit = legacy && strcmp(legacy, "1") == 0 ? GL_LEGACY_MAX : GL_MAX;
+        LOG("[gmiss] learned_range_limit=%d refresh_recency=%d\n", limit, limit == GL_MAX);
+    }
+    for (int i = 0; i < gl_n; i++) {
+        if (off < gl_learned[i].lo || off >= gl_learned[i].hi) continue;
+        if (limit == GL_MAX && i + 1 < gl_n) {
+            GcRange range = gl_learned[i];
+            memmove(gl_learned + i, gl_learned + i + 1, sizeof range * (gl_n - i - 1));
+            gl_learned[gl_n - 1] = range;
+        }
+        return;
+    }
     GaRes *in = NULL;
     for (int i = 0; i < ga_nres && !in; i++)
         if (ga_res[i].live && ga_res[i].lo <= off && off < ga_res[i].hi) in = &ga_res[i];
@@ -5128,7 +5164,7 @@ static void gres_learn(uint32_t off) {
         if (hi <= lo || !(in = gres_get(lo, hi, true))) return;
         in->learned = true;
     }
-    if (gl_n == GL_MAX) {  // (the oldest out - its window a spare, if only learning made it: ga_res_alloc)
+    if (gl_n == limit) {  // (the oldest out - its window a spare, if only learning made it: ga_res_alloc)
         for (int i = 0; i < ga_nres; i++) {
             GaRes *e = &ga_res[i];
             if (e->live && e->learned && !e->stored && e->lo == gl_learned[0].lo && e->hi == gl_learned[0].hi) e->spare = true;
@@ -5781,7 +5817,10 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     return true;
 }
 
-static int g_cs_n;  // (compute program table below)
+typedef struct CsProg CsProg;
+typedef struct { uint64_t addr; CsProg *program; } CsEntry;
+static CsEntry *g_cs_tab;
+static size_t g_cs_n, g_cs_cap;
 
 // In-place reboot (device.c backend_reset; GPU idle): drop what is keyed by guest addresses - programs by code
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
@@ -5789,6 +5828,7 @@ static int g_cs_n;  // (compute program table below)
 void vk_exec_reset(void) {
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
+    if (g_cs_tab) memset(g_cs_tab, 0, g_cs_cap * sizeof *g_cs_tab);
     g_cs_n = 0;
     gcopy_gen++;
     if (gmem_buf) {
@@ -6090,7 +6130,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
 }
 
 // ================================================================== compute
-typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3]; uint64_t code_addr; } CsProg;
+struct CsProg { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3]; uint64_t code_addr; };
 
 static void build_compute(void *arg) {
     CsProg *cp = arg;
@@ -6124,17 +6164,45 @@ static void build_compute(void *arg) {
     free(spv);
 }
 
-static struct CsEnt { uint64_t addr; CsProg *cp; } g_cs_tab[256];  // compute programs by code address
+// Shaders can return at different addresses after loading. Once the old 256-entry table filled, each new shader was
+// translated and built again at every dispatch. Only the entries move on growth; workers retain their program pointers.
+static CsEntry *cs_slot(CsEntry *table, size_t capacity, uint64_t addr) {
+    size_t mask = capacity - 1;
+    size_t i = (size_t)((addr * 0x9E3779B97F4A7C15ull) >> 32) & mask;
+    while (table[i].addr && table[i].addr != addr) i = (i + 1) & mask;
+    return &table[i];
+}
+
+static bool cs_grow(void) {
+    if (g_cs_cap > SIZE_MAX / sizeof(CsEntry) / 2) return false;
+    size_t capacity = g_cs_cap ? g_cs_cap * 2 : 512;
+    CsEntry *table = calloc(capacity, sizeof *table);
+    if (!table) return false;
+    for (size_t i = 0; i < g_cs_cap; i++) {
+        if (g_cs_tab[i].addr) *cs_slot(table, capacity, g_cs_tab[i].addr) = g_cs_tab[i];
+    }
+    free(g_cs_tab);
+    g_cs_tab = table;
+    LOG("[compute-cache] programs=%zu slots=%zu->%zu\n", g_cs_n, g_cs_cap, capacity);
+    g_cs_cap = capacity;
+    return true;
+}
 
 static CsProg *compute_program(NvnProgram *np) {
     NvnShaderStage *ss = &np->stages[5];
     if (!ss->code_addr) return NULL;
-    struct CsEnt *tab = g_cs_tab;
-    int n = g_cs_n;
-    for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr) return tab[i].cp;
+    if (!g_cs_cap && !cs_grow()) return NULL;
+    CsEntry *entry = cs_slot(g_cs_tab, g_cs_cap, ss->code_addr);
+    if (entry->addr) return entry->program;
+    if (g_cs_n >= g_cs_cap / 2) {
+        if (!cs_grow()) return NULL;
+        entry = cs_slot(g_cs_tab, g_cs_cap, ss->code_addr);
+    }
     CsProg *cp = calloc(1, sizeof *cp);
+    if (!cp) return NULL;
     cp->code_addr = ss->code_addr;
-    if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
+    *entry = (CsEntry){ss->code_addr, cp};
+    g_cs_n++;
     pthread_mutex_lock(&translate_lock);  // (the translator's globals too: the translator thread sets them for graphics)
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
