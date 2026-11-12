@@ -10,6 +10,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [60 FPS e cache de vértices](2026-11-historico-odin2.md#60-fps-e-cache-de-vértices) | BOTW 1.8.2, Odin 2 Portal | 37,56 FPS reais na cena pesada a 1×. O ganho do cache experimental aguarda teste físico. |
 | [Upstream 0.3.4-beta-amaral.1](2026-11-historico-odin2.md#upstream-034-beta-amaral1) | Build e testes no host | APK e testes verificados no host. A validação em hardware segue pendente no relatório. |
 | [Revisão do repositório, 12/11](2026-11-12-revisao-repo.md) | Amaral.2, host | Sem perdas do upstream; merge do upstream registrado; testes no repositório (`tools/run_host_tests.sh`). O cache de vértices não age no Odin com o Turnip. |
+| [Amaral.3, 12/11](2026-11-12-amaral3.md) | Host | Pré-aquecimento de pipelines (opção experimental, desligada) e medição de programas e pipelines em jogo; contador do caso de alias do G-buffer, ainda sem correção. Testes no Odin pendentes. |
 
 ## Revisões externas e Turnip
 
