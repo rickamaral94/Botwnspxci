@@ -13,6 +13,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 
 ## Revisões externas e Turnip
 
+- [12/11 — Passagem para o Claude com os ajustes de PC pendentes](2026-11-12-handoff-claude-ajustes-pc.md)
 - [11/11 — Amaral.2, mudanças vindas de outros ports e testes](2026-11-11-amaral2-cross-port.md)
 - [11/11 — outros ports e experimentos para o BOTW](2026-11-11-revisao-externa.md)
 - [Turnip — evidências para o Amaral Adreno Tools](TURNIP.md)
