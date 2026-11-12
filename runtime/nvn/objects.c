@@ -1342,6 +1342,19 @@ static void set_shaders(Cpu *c, int stride) {
         p->stages[stage].const_size = *(const uint32_t *)(control + 0x6FC);
         p->stage_mask |= 1u << stage;
     }
+#ifdef __ANDROID__
+    if ((p->stage_mask & 3) == 3) {  // (a graphics program: its time, and the pipeline warm-up - vulkan/exec.c)
+        extern void vk_warm_note_program(const uint64_t code[2], const uint64_t cmax[2], const size_t cbytes[2]);
+        uint64_t code[2], cmax[2];
+        size_t cbytes[2];
+        for (int i = 0; i < 2; i++) {
+            code[i] = p->stages[i].code_addr;
+            cmax[i] = p->stages[i].const_offset ? p->stages[i].const_offset : 0x10000;
+            cbytes[i] = p->stages[i].const_offset ? p->stages[i].const_size : 0;
+        }
+        vk_warm_note_program(code, cmax, cbytes);
+    }
+#endif
     RET(1);
 }
 

@@ -692,6 +692,14 @@ static void *report_main(void *arg) {
         vk_diag_context(ctx, sizeof ctx);
 #endif
         out("run: %s", ctx);
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+        {   // (vulkan/exec.c: programs and pipelines made in play, the draws that waited for them, the warm-up)
+            extern void vk_warm_summary(char *out, size_t n);
+            char pw[400];
+            vk_warm_summary(pw, sizeof pw);
+            out("pipelines: %s", pw);
+        }
+#endif
         double gpu = 0;
         for (int i = 0; i < f_n; i++) if (f_flags[i] & 1) gpu += f_gpu[i] / 1e6;
         double p50 = 0, p95 = 0, p99 = 0;

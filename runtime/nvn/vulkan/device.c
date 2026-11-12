@@ -1629,6 +1629,12 @@ void vk_present_now(NvnTexture *t, uint64_t asked) {  // (the window's half of b
 void backend_present(NvnTexture *t) {
 #endif
     g_last_presented = t;
+#ifdef __ANDROID__
+    {   // (vulkan/exec.c: the pipeline warm-up's work, once a frame)
+        extern void vk_warm_frame(void);
+        vk_warm_frame();
+    }
+#endif
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();

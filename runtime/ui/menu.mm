@@ -684,6 +684,13 @@ static void tab_display(void) {
     opt_toggle("Vertex copy reuse (experimental)", &g_settings.gcopy_range, false,
                "Reuses the copied prefix when consecutive draws read a growing range of the same vertex buffer. "
                "Compare the same scene with this off, on, then off again. Watch for broken geometry. Applies at once.");
+#ifdef __ANDROID__
+    opt_toggle("Pipeline warm-up (experimental)", &g_settings.pipe_warm, false,
+               "Remembers the graphics pipelines made while you play and, the next time the game loads their shaders, "
+               "makes them before they are drawn - fewer stutters the first time through a place. Play the route once "
+               "with this on to make the list, then compare it on and off. The list stays on the phone and is dropped "
+               "after an update or a driver change. Applies at once.");
+#endif
     opt_toggle("Native game code (experimental)", &g_settings.native_code, false,
                "Runs the game's own code directly on the phone's CPU instead of the game code built at setup: no build "
                "needed. An experiment - report what goes wrong. Applies the next time the game starts.");

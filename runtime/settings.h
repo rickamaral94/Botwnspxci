@@ -48,6 +48,7 @@ typedef struct {
     bool fg_hud;            // the HUD kept sharp in the generated frames: the real frame's pixels where the HUD is (framegen.c)
     int fg_mult;            // its multiplier: 0 2x (30 -> 60), 1 3x (40 -> 120), 2 4x (30 -> 120)
     bool cbuf_inplace;      // Video > Constant buffers read in place (experimental; only with Sync lag off): vulkan/exec.c
+    bool pipe_warm;         // Video > Pipeline warm-up (experimental): pipelines of the route's list made early (vulkan/exec.c)
     bool gcopy_range;       // Video > Vertex copy reuse (experimental): vulkan/exec.c; on/off in one build for A/B/A
     int fps_mode;         // 0: the game's own choice (30 / 60, the frame pacer), 1: 30 fps, 2: 60 fps, 3: 20 fps, 4: 45 fps
     bool shader_int32;    // shader address math in 32-bit words even where the driver offers 64-bit (vulkan/exec.c)

@@ -26,6 +26,9 @@
 #include "../renderer.h"
 #include "../../settings.h"
 #include "../../paths.h"
+#ifdef __ANDROID__
+static void warm_stats(void);  // (the pipeline warm-up, below: renderer_stats's 10 s line)
+#endif
 
 // LARECOMP_AB (vk_ab, below): AB() costs no call while it is not set - it is asked per constant buffer and per pass
 static int ab_n = -1;  // (LARECOMP_AB's frame count; 0: no A/B)
@@ -1469,6 +1472,9 @@ const char *renderer_stats(void) {
         (unsigned long long)(build_wait_spin_ns() / 1000), (unsigned long long)stat_build_wait_count,
         (unsigned long long)stat_build_wait_spin_count, (double)stat_build_wait_ns / 1e6);
     stat_build_wait_count = stat_build_wait_spin_count = 0;
+#ifdef __ANDROID__
+    warm_stats();
+#endif
     gcopy_copied = gcopy_reused = gcopy_grow_saved = gcopy_grow_appends = gcopy_vtx_direct = gcopy_vtx_copied = 0;
     stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
@@ -2834,6 +2840,42 @@ static void translate_program(void *arg) {
 #define PROG_TAB 4096
 static struct { uint64_t key; Prog *prog; } prog_tab[PROG_TAB];
 
+// A program's table key: its two shaders' code addresses and their keys (draws and the pipeline warm-up alike)
+static uint64_t program_key(const uint64_t code[2], const ShaderKey *vkey, const ShaderKey *fkey) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (int i = 0; i < 2; i++) { uint64_t a = code[i]; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
+    h = hash_words(h, vkey, sizeof *vkey);  // (8 bytes a step: the table is in memory only)
+    for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+#ifdef __ANDROID__
+    if (fkey->no_ds_write) { h ^= 0xE1; h *= 0x100000001B3ull; }  // (keys without it hash as before)
+#endif
+    return h ? h : 1;
+}
+
+static int g_prog_n;  // (programs in prog_tab: the warm-up leaves room)
+// The program of these shaders and keys, translated in the background when new (*created)
+static Prog *program_for(const uint64_t code[2], const uint64_t cmax[2], const size_t cbytes[2], const ShaderKey *vkey,
+                         const ShaderKey *fkey, bool *created) {
+    uint64_t h = program_key(code, vkey, fkey);
+    uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
+    while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
+    *created = !prog_tab[slot].key;
+    if (!*created) return prog_tab[slot].prog;
+    Prog *p = calloc(1, sizeof *p);
+    prog_tab[slot].key = h;
+    prog_tab[slot].prog = p;
+    g_prog_n++;
+    for (int i = 0; i < 2; i++) p->code[i] = code[i], p->cmax[i] = cmax[i], p->const_bytes[i] = cbytes[i];
+    p->vkey = *vkey;
+    p->fkey = *fkey;
+    run_translate(translate_program, p);
+    return p;
+}
+#ifdef __ANDROID__
+static void warm_program_seen(const uint64_t code[2]);
+static void warm_reset(void);
+#endif
+
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     if (!(np->stage_mask & 1) || !(np->stage_mask & 2)) return NULL;
     // (the previous draw's program and keys again - most draws: no hashing; the code addresses are part of it, as
@@ -2847,30 +2889,19 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
         return last_prog;
     last_np = np, last_code[0] = np->stages[0].code_addr, last_code[1] = np->stages[1].code_addr;
     last_vkey = *vkey, last_fkey = *fkey;
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
-    h = hash_words(h, vkey, sizeof *vkey);  // (8 bytes a step: the table is in memory only)
-    for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
-#ifdef __ANDROID__
-    if (fkey->no_ds_write) { h ^= 0xE1; h *= 0x100000001B3ull; }  // (keys without it hash as before)
-#endif
-    if (!h) h = 1;
-    uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
-    while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
-    if (prog_tab[slot].key) return last_prog = prog_tab[slot].prog;
-    Prog *p = calloc(1, sizeof *p);
-    last_prog = p;
-    prog_tab[slot].key = h;
-    prog_tab[slot].prog = p;
+    uint64_t code[2], cmax[2];
+    size_t cbytes[2];
     for (int i = 0; i < 2; i++) {
-        p->code[i] = np->stages[i].code_addr;
-        p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
-        p->const_bytes[i] = np->stages[i].const_offset ? np->stages[i].const_size : 0;
+        code[i] = np->stages[i].code_addr;
+        cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
+        cbytes[i] = np->stages[i].const_offset ? np->stages[i].const_size : 0;
     }
-    p->vkey = *vkey;
-    p->fkey = *fkey;
-    run_translate(translate_program, p);
-    return p;
+    bool created;
+    last_prog = program_for(code, cmax, cbytes, vkey, fkey, &created);
+#ifdef __ANDROID__
+    if (created) warm_program_seen(code);  // (pipeline warm-up: the time from nvnProgramSetShaders, new in play)
+#endif
+    return last_prog;
 }
 
 // ================================================================== vertex formats / fixed function tables
@@ -3115,6 +3146,7 @@ typedef struct {
     _Atomic int state;   // 0 building, 1 ready, 2 failed
     uint64_t used, seq;  // when it was last bound (ns), and that submission (pipe_evict)
     bool evicted;        // its VkPipeline destroyed by pipe_evict: built again at its next use
+    bool warmed, warm_used;  // (made by the pipeline warm-up; a draw has used it since)
 } Pipe;
 #define PIPE_TAB 8192
 static struct { uint64_t key; Pipe *pipe; } pipe_tab[PIPE_TAB];
@@ -3187,6 +3219,28 @@ static uint64_t hmix(uint64_t h, const void *p, size_t n) {
 
 static VkPrimitiveTopology topo_class_base(uint8_t c) {
     return c == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : c == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+}
+
+static void build_pipeline(void *arg);
+static int g_pipe_n;  // (pipelines in pipe_tab: the warm-up leaves room)
+// The pipeline of key k (hash ph), built in the background when new (*created) or destroyed by pipe_evict
+static Pipe *pipe_for(const PipeKey *k, uint64_t ph, bool *created) {
+    uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
+    while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
+    Pipe *pp = pipe_tab[pslot].pipe;
+    *created = !pp;
+    if (!pp) {
+        pp = calloc(1, sizeof *pp);
+        pp->k = *k;
+        pipe_tab[pslot].key = ph;
+        pipe_tab[pslot].pipe = pp;
+        g_pipe_n++;
+        run_job(build_pipeline, pp);
+    } else if (pp->evicted) {  // (destroyed by pipe_evict: built again)
+        pp->evicted = false;
+        run_job(build_pipeline, pp);
+    }
+    return pp;
 }
 
 static void build_pipeline(void *arg) {
@@ -3401,6 +3455,34 @@ static bool view_overlaps_rt(const NvnTexEntry *e, const NvnTextureView *rv, boo
     return r_lv >= lv0 && r_lv < lv0 + nlv && r_ly >= ly0 && r_ly < ly0 + nly;
 }
 
+// The alias case view_overlaps_rt leaves out (the G-buffer alias fix of SavageWindRecomp, 62677b2): a target drawn at a
+// level or layer other than 0 while the draw samples a view of the same texture that covers it. view_overlaps_rt
+// answers "no" there, so no copy and no in-place handling - a read of what the draw writes, if the shader reads that
+// level. Whether BOTW ever does it is counted ([alias] in the 10 s line, the first ones logged with their fragment
+// shader) before anything changes (docs/logs/2026-11-12-handoff-claude-ajustes-pc.md, item 2).
+static bool view_covers(const NvnTexEntry *e, uint32_t lv, uint32_t ly) {
+    uint32_t lv0 = e->has_view && (e->view.setmask & 1) ? e->view.base_level : 0;
+    uint32_t nlv = e->has_view && (e->view.setmask & 1) && e->view.num_levels ? e->view.num_levels : (e->tex->levels > lv0 ? e->tex->levels - lv0 : 1);
+    uint32_t ly0 = e->has_view && (e->view.setmask & 2) ? e->view.min_layer : 0;
+    uint32_t nly = e->has_view && (e->view.setmask & 2) && e->view.num_layers ? e->view.num_layers : 1;
+    return lv >= lv0 && lv < lv0 + nlv && ly >= ly0 && ly < ly0 + nly;
+}
+static uint64_t stat_alias;
+static bool alias_case(const NvnTexEntry *e, const NvnTextureView *rv, bool has_rv) {
+    uint32_t r_lv = has_rv && (rv->setmask & 1) ? rv->base_level : 0;
+    uint32_t r_ly = has_rv && (rv->setmask & 2) ? rv->min_layer : 0;
+    return (r_lv || r_ly) && view_covers(e, r_lv, r_ly);
+}
+static void alias_note(const NvnTexEntry *e, const NvnTextureView *rv, bool has_rv) {
+    if (!alias_case(e, rv, has_rv)) return;
+    stat_alias++;
+    static int n;
+    if (n++ < 10)
+        LOG("[alias] frame %llu: a draw into level %u layer %u of %ux%u samples a view covering it (fs %016llx)\n",
+            (unsigned long long)renderer_present_count(), has_rv && (rv->setmask & 1) ? rv->base_level : 0,
+            has_rv && (rv->setmask & 2) ? rv->min_layer : 0, e->tex->width, e->tex->height, (unsigned long long)g_cur_fs_hash);
+}
+
 static bool is_attachment_entry(const NvnTexEntry *e) {
     if (!e || !e->tex) return false;
     {   // LARECOMP_FEEDBACK_ANY_LAYER=1 (test): an array / mipmapped target sampled at any of its layers or levels
@@ -3409,9 +3491,15 @@ static bool is_attachment_entry(const NvnTexEntry *e) {
         if (any && (e->tex->layout.layers > 1 || e->tex->levels > 1))
             for (int i = 0; i < st.rt.ncolor; i++) if (e->tex == st.rt.color[i]) return true;
     }
-    if (e->tex == st.rt.depth && view_overlaps_rt(e, &st.rt.dview, st.rt.has_dview != 0)) return true;
-    for (int i = 0; i < st.rt.ncolor; i++)
-        if (e->tex == st.rt.color[i] && view_overlaps_rt(e, &st.rt.cview[i], st.rt.has_cview[i] != 0)) return true;
+    if (e->tex == st.rt.depth) {
+        if (view_overlaps_rt(e, &st.rt.dview, st.rt.has_dview != 0)) return true;
+        alias_note(e, &st.rt.dview, st.rt.has_dview != 0);
+    }
+    for (int i = 0; i < st.rt.ncolor; i++) {
+        if (e->tex != st.rt.color[i]) continue;
+        if (view_overlaps_rt(e, &st.rt.cview[i], st.rt.has_cview[i] != 0)) return true;
+        alias_note(e, &st.rt.cview[i], st.rt.has_cview[i] != 0);
+    }
     return false;
 }
 
@@ -5833,6 +5921,10 @@ static size_t g_cs_n, g_cs_cap;
 void vk_exec_reset(void) {
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
+    g_prog_n = g_pipe_n = 0;
+#ifdef __ANDROID__
+    warm_reset();  // (pending warm-ups pointed at the programs just dropped)
+#endif
     if (g_cs_tab) memset(g_cs_tab, 0, g_cs_cap * sizeof *g_cs_tab);
     g_cs_n = 0;
     gcopy_gen++;
@@ -6366,6 +6458,276 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
     }
 }
 
+#ifdef __ANDROID__
+// ================================================================== pipeline warm-up (Video > Pipeline warm-up)
+// A program and its pipelines are made at the first draw that needs them: that draw and the next ones are skipped
+// (or, into a kept target, waited for) while they build - the first pass through a place stutters. The game hands
+// its shaders over earlier, in nvnProgramSetShaders (nvn/objects.c set_shaders), when their code is in memory.
+// Measured always (the [pipe-warm] line every 10 s, the performance report): the programs and pipelines new in
+// play, the draws skipped and waited for, and the time from nvnProgramSetShaders to the program's first draw - the
+// warm-up can only help where that time is long.
+// Warm-up (experimental, off; settings.pipe_warm, LARECOMP_PIPE_WARM=0/1): each pipeline made in play goes into a
+// list (cache/pipe_warm.bin, the app's own storage: hashes of the shaders' first bytes, their keys and the pipeline's
+// key - none of the game's data); when the game sets shaders of a listed pair later, their program and pipelines
+// are made then, through the same program_for / pipe_for as a draw - same tables, same keys, same retention - so a
+// wrong or stale entry only costs work: the draw still looks up its own key. A list from another game version,
+// another build of this runtime or another driver is dropped.
+typedef struct {
+    uint64_t vsh, fsh;  // (hmix of 0x200 bytes after each shader's 0x30-byte NVN header, as draw_'s fragment hash)
+    ShaderKey vkey, fkey;
+    PipeKey pk;         // (prog NULL)
+} WarmEntry;
+typedef struct {
+    char magic[8];  // "BOTWPW1"
+    uint32_t entry_size, game_version;
+    uint64_t build;  // (this runtime's build)
+    uint32_t vendor, device, driver_version, count;
+    uint8_t cache_uuid[VK_UUID_SIZE];
+} WarmHeader;
+#define WARM_MAX 16384
+static WarmEntry *warm_list;
+static int warm_n, warm_loaded = -1;  // (-1: not read yet)
+static int32_t warm_index[WARM_MAX * 2], *warm_next;  // (by shader pair: first entry, then a chain)
+static bool warm_dirty;
+static uint64_t warm_saved_at;
+// set_shaders -> render thread: each graphics program the game sets (code, constants), and when
+typedef struct { uint64_t code[2], cmax[2]; size_t cbytes[2]; uint64_t t; } WarmSet;
+#define WARM_Q 1024
+static WarmSet warm_q[WARM_Q];
+static int warm_qn;
+static _Atomic int warm_qpending;
+static pthread_mutex_t warm_qlock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t warm_qdropped;
+// when each code pair was set (render thread), for the time to its first draw
+static struct { uint64_t vs, fs, t; } warm_set_at[4096];
+// programs being made for listed pipelines: their pipelines follow once each program is ready
+#define WARM_PEND 4096
+static struct { Prog *p; int entry; } warm_pend[WARM_PEND];
+static int warm_npend;
+// counters: this 10 s window (w_) and since the start (t_)
+static uint64_t w_prog, w_pipe, w_skip_shader, w_skip_pipe, w_waits, w_lead_none, t_prog, t_pipe, t_skip, t_waits;
+static uint32_t w_lead[1024];
+static int w_nlead;
+static uint64_t warm_made, warm_used_n, warm_rejected, warm_ns;
+
+static bool warm_on(void) {
+    static int env = -2;
+    if (env == -2) env = getenv("LARECOMP_PIPE_WARM") ? atoi(getenv("LARECOMP_PIPE_WARM")) != 0 : -1;
+    return env >= 0 ? env : g_settings.pipe_warm;
+}
+static uint64_t warm_code_hash(uint64_t code) {
+    return code ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(code + 0x30), 0x200) : 0;
+}
+static uint32_t warm_slot(uint64_t vsh, uint64_t fsh) {
+    uint64_t h = (vsh * 0x9E3779B97F4A7C15ull) ^ fsh;
+    return (uint32_t)(h ^ (h >> 31)) % (WARM_MAX * 2);
+}
+static void warm_header(WarmHeader *h) {
+    memset(h, 0, sizeof *h);
+    memcpy(h->magic, "BOTWPW1", 8);
+    h->entry_size = sizeof(WarmEntry);
+    h->game_version = (uint32_t)g_game_version;
+    h->build = hmix(1469598103934665603ull, __DATE__ " " __TIME__, sizeof(__DATE__ " " __TIME__));
+    h->vendor = g_vk.props.vendorID, h->device = g_vk.props.deviceID, h->driver_version = g_vk.props.driverVersion;
+    memcpy(h->cache_uuid, g_vk.props.pipelineCacheUUID, VK_UUID_SIZE);
+}
+// The entries of a list file in buf (n bytes) when its header matches want, else NULL; *count: how many
+static const void *warm_parse(const void *buf, size_t n, const WarmHeader *want, size_t entry_size, uint32_t *count) {
+    const WarmHeader *h = buf;
+    *count = 0;
+    if (n < sizeof *h || memcmp(h->magic, want->magic, 8) || h->entry_size != entry_size || h->game_version != want->game_version ||
+        h->build != want->build || h->vendor != want->vendor || h->device != want->device ||
+        h->driver_version != want->driver_version || memcmp(h->cache_uuid, want->cache_uuid, VK_UUID_SIZE) ||
+        h->count > WARM_MAX || (n - sizeof *h) / entry_size < h->count)
+        return NULL;
+    *count = h->count;
+    return (const uint8_t *)buf + sizeof *h;
+}
+static void warm_add(const WarmEntry *e) {  // (unless listed already)
+    uint32_t slot = warm_slot(e->vsh, e->fsh);
+    for (int i = warm_index[slot] - 1; i >= 0; i = warm_next[i] - 1)
+        if (!memcmp(&warm_list[i], e, sizeof *e)) return;
+    if (warm_n >= WARM_MAX) return;
+    warm_list[warm_n] = *e;
+    warm_next[warm_n] = warm_index[slot];
+    warm_index[slot] = ++warm_n;
+}
+static void warm_load(void) {
+    warm_loaded = 1;
+    warm_list = calloc(WARM_MAX, sizeof *warm_list);
+    warm_next = calloc(WARM_MAX, sizeof *warm_next);
+    if (!warm_list || !warm_next) { warm_loaded = 0; return; }
+    FILE *f = fopen("cache/pipe_warm.bin", "rb");
+    if (!f) { LOG("[pipe-warm] no list yet: this run writes one\n"); return; }
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    void *buf = n > 0 ? malloc((size_t)n) : NULL;
+    bool ok = buf && fread(buf, 1, (size_t)n, f) == (size_t)n;
+    fclose(f);
+    WarmHeader want;
+    warm_header(&want);
+    uint32_t count = 0;
+    const WarmEntry *e = ok ? warm_parse(buf, (size_t)n, &want, sizeof(WarmEntry), &count) : NULL;
+    if (!e) warm_rejected++, LOG("[pipe-warm] the list is of another game version, build or driver: dropped\n");
+    for (uint32_t i = 0; e && i < count; i++) warm_add(&e[i]);
+    LOG("[pipe-warm] list: %d pipelines\n", warm_n);
+    free(buf);
+}
+static void warm_save(void) {
+    mkdir("cache", 0755);
+    FILE *f = fopen("cache/pipe_warm.bin.tmp", "wb");
+    if (!f) return;
+    WarmHeader h;
+    warm_header(&h);
+    h.count = (uint32_t)warm_n;
+    bool ok = fwrite(&h, sizeof h, 1, f) == 1 && fwrite(warm_list, sizeof *warm_list, (size_t)warm_n, f) == (size_t)warm_n;
+    ok &= fclose(f) == 0;
+    if (ok) rename("cache/pipe_warm.bin.tmp", "cache/pipe_warm.bin");
+    else remove("cache/pipe_warm.bin.tmp");
+    warm_dirty = false;
+}
+static void warm_reset(void) { warm_npend = 0; }
+
+// (nvn/objects.c set_shaders, the game's thread) a graphics program set: queued for the render thread
+void vk_warm_note_program(const uint64_t code[2], const uint64_t cmax[2], const size_t cbytes[2]) {
+    pthread_mutex_lock(&warm_qlock);
+    if (warm_qn < WARM_Q) {
+        WarmSet *w = &warm_q[warm_qn++];
+        for (int i = 0; i < 2; i++) w->code[i] = code[i], w->cmax[i] = cmax[i], w->cbytes[i] = cbytes[i];
+        w->t = plat_now_ns();
+        atomic_store_explicit(&warm_qpending, 1, memory_order_release);
+    } else warm_qdropped++;
+    pthread_mutex_unlock(&warm_qlock);
+}
+
+// (render thread) the queued programs: their time noted, and with the warm-up on their listed pipelines begun
+static void warm_drain(void) {
+    if (!atomic_load_explicit(&warm_qpending, memory_order_acquire)) return;
+    static WarmSet q[WARM_Q];
+    pthread_mutex_lock(&warm_qlock);
+    int n = warm_qn;
+    memcpy(q, warm_q, sizeof *q * (size_t)n);
+    warm_qn = 0;
+    atomic_store_explicit(&warm_qpending, 0, memory_order_relaxed);
+    pthread_mutex_unlock(&warm_qlock);
+    bool on = warm_on();
+    if (on && warm_loaded < 0) warm_load();
+    uint64_t t0 = plat_now_ns();
+    for (int i = 0; i < n; i++) {
+        WarmSet *w = &q[i];
+        uint32_t s = (uint32_t)((w->code[0] * 0x9E3779B97F4A7C15ull) ^ w->code[1]) % 4096;
+        warm_set_at[s].vs = w->code[0], warm_set_at[s].fs = w->code[1], warm_set_at[s].t = w->t;
+        if (!on || warm_loaded != 1 || !warm_n) continue;
+        uint64_t vsh = warm_code_hash(w->code[0]), fsh = warm_code_hash(w->code[1]);
+        for (int e = warm_index[warm_slot(vsh, fsh)] - 1; e >= 0; e = warm_next[e] - 1) {
+            const WarmEntry *we = &warm_list[e];
+            if (we->vsh != vsh || we->fsh != fsh) continue;
+            if (warm_npend >= WARM_PEND || g_prog_n > PROG_TAB * 3 / 4) break;  // (room left for the draws' own)
+            bool created;
+            Prog *p = program_for(w->code, w->cmax, w->cbytes, &we->vkey, &we->fkey, &created);
+            warm_pend[warm_npend].p = p, warm_pend[warm_npend].entry = e, warm_npend++;
+        }
+    }
+    warm_ns += plat_now_ns() - t0;
+}
+
+// (render thread, each frame) the queue, and the pipelines of the programs made ready since - up to 64 a frame
+static void warm_frame(void) {
+    warm_drain();
+    if (!warm_npend) return;
+    uint64_t t0 = plat_now_ns();
+    int made = 0, j = 0;
+    for (int i = 0; i < warm_npend; i++) {
+        Prog *p = warm_pend[i].p;
+        int st_ = atomic_load(&p->state);
+        if (st_ == 0 || (st_ == 1 && made >= 64)) { warm_pend[j++] = warm_pend[i]; continue; }  // (later)
+        if (st_ != 1 || g_pipe_n > PIPE_TAB * 3 / 4) continue;  // (failed, or no room: dropped)
+        PipeKey k = warm_list[warm_pend[i].entry].pk;
+        k.prog = p;
+        uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
+        if (!ph) ph = 1;
+        bool created;
+        Pipe *pp = pipe_for(&k, ph, &created);
+        if (created) pp->warmed = true, warm_made++, made++;
+    }
+    warm_npend = j;
+    warm_ns += plat_now_ns() - t0;
+}
+
+// (get_program) a program new at a draw: in play, its time since nvnProgramSetShaders
+static void warm_program_seen(const uint64_t code[2]) {
+    warm_drain();
+    if (!diag_in_gameplay()) return;
+    w_prog++, t_prog++;
+    uint32_t s = (uint32_t)((code[0] * 0x9E3779B97F4A7C15ull) ^ code[1]) % 4096;
+    if (warm_set_at[s].vs == code[0] && warm_set_at[s].fs == code[1] && warm_set_at[s].t) {
+        uint64_t d = plat_now_ns() - warm_set_at[s].t;
+        if (w_nlead < 1024) w_lead[w_nlead++] = (uint32_t)(d / 1000000 > 0xFFFFFFFF ? 0xFFFFFFFF : d / 1000000);
+    } else w_lead_none++;
+}
+
+// (draw_) a pipeline new at a draw: in play counted; with the warm-up on, into the route's list
+static void warm_pipeline_new(Pipe *pp) {
+    if (diag_in_gameplay()) w_pipe++, t_pipe++;
+    if (!warm_on()) return;
+    if (warm_loaded < 0) warm_load();
+    if (warm_loaded != 1) return;
+    WarmEntry e;
+    memset(&e, 0, sizeof e);
+    const Prog *p = pp->k.prog;
+    e.vsh = warm_code_hash(p->code[0]), e.fsh = warm_code_hash(p->code[1]);
+    e.vkey = p->vkey, e.fkey = p->fkey;
+    e.pk = pp->k;
+    e.pk.prog = NULL;
+    int before = warm_n;
+    warm_add(&e);
+    if (warm_n != before) warm_dirty = true;
+}
+
+static int warm_cmp_u32(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+// (renderer_stats, every 2 s) the [pipe-warm] line every 10 s; the list written when it grew (at most every 30 s)
+static void warm_stats(void) {
+    static int calls;
+    uint64_t now = plat_now_ns();
+    if (warm_dirty && now - warm_saved_at > 30000000000ull) warm_save(), warm_saved_at = now;
+    if (++calls % 5) return;
+    uint32_t p50 = 0, p95 = 0;
+    if (w_nlead) {
+        qsort(w_lead, (size_t)w_nlead, sizeof *w_lead, warm_cmp_u32);
+        p50 = w_lead[w_nlead / 2], p95 = w_lead[w_nlead * 95 / 100];
+    }
+    if (w_prog || w_pipe || w_skip_shader || w_skip_pipe || warm_on())
+        LOG("[pipe-warm] 10 s in play: new %llu programs, %llu pipelines; skipped draws: shader %llu, pipeline %llu; "
+            "waits %llu; set -> first draw p50 %u ms p95 %u ms (%d, %llu never seen set); warm-up %s: list %d, made %llu, "
+            "used %llu, pending %d, %.1f ms, %llu queue drops\n",
+            (unsigned long long)w_prog, (unsigned long long)w_pipe, (unsigned long long)w_skip_shader,
+            (unsigned long long)w_skip_pipe, (unsigned long long)w_waits, p50, p95, w_nlead, (unsigned long long)w_lead_none,
+            warm_on() ? "on" : "off", warm_n, (unsigned long long)warm_made, (unsigned long long)warm_used_n, warm_npend,
+            warm_ns / 1e6, (unsigned long long)warm_qdropped);
+    {   // (the G-buffer alias case, is_attachment_entry: every 10 s, whether or not the warm-up runs)
+        static uint64_t alias_last;
+        LOG("[alias] 10 s: %llu draws into a level / layer other than 0 sampling a view that covers it (%llu since the start)\n",
+            (unsigned long long)(stat_alias - alias_last), (unsigned long long)stat_alias);
+        alias_last = stat_alias;
+    }
+    t_skip += w_skip_shader + w_skip_pipe, t_waits += w_waits;
+    w_prog = w_pipe = w_skip_shader = w_skip_pipe = w_waits = w_lead_none = 0, w_nlead = 0;
+}
+// (diag.c, the performance report) since the start
+void vk_warm_summary(char *out, size_t n) {
+    snprintf(out, n, "new in play: %llu programs, %llu pipelines; skipped draws %llu, waits %llu; warm-up %s, list %d, "
+             "made %llu, used %llu", (unsigned long long)t_prog, (unsigned long long)t_pipe,
+             (unsigned long long)(t_skip + w_skip_shader + w_skip_pipe), (unsigned long long)(t_waits + w_waits),
+             warm_on() ? "on" : "off", warm_n, (unsigned long long)warm_made, (unsigned long long)warm_used_n);
+}
+// (device.c, each frame presented) the warm-up's own work
+void vk_warm_frame(void) { warm_frame(); }
+#endif
+
 static void draw_(CmdRec *r, bool indexed);
 // (diagnosis: dark frames) the first skipped draws into a large target - which passes still skip while their shaders
 // build: their target's size and whether it has depth
@@ -6509,9 +6871,19 @@ static void draw_(CmdRec *r, bool indexed) {
         }
         keep = kkeep;
     }
+#ifdef __ANDROID__
+    if (pr && keep && !atomic_load(&pr->state) && diag_in_gameplay()) w_waits++;
+#endif
     if (pr && keep) wait_built(&pr->state);
     if (pr && !atomic_load(&pr->state)) stat_skipped_building++;
-    if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; skip_note("shader"); return; }
+    if (!pr || atomic_load(&pr->state) != 1) {
+#ifdef __ANDROID__
+        if (diag_in_gameplay()) w_skip_shader++;
+#endif
+        stat_skipped++;
+        skip_note("shader");
+        return;
+    }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -6981,19 +7353,12 @@ static void draw_(CmdRec *r, bool indexed) {
         uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
         if (!ph) ph = 1;
 #endif
-        uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
-        while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
-        pp = pipe_tab[pslot].pipe;
-        if (!pp) {
-            pp = calloc(1, sizeof *pp);
-            pp->k = k;
-            pipe_tab[pslot].key = ph;
-            pipe_tab[pslot].pipe = pp;
-            run_job(build_pipeline, pp);
-        } else if (pp->evicted) {  // (destroyed by pipe_evict: built again)
-            pp->evicted = false;
-            run_job(build_pipeline, pp);
-        }
+        bool created;
+        pp = pipe_for(&k, ph, &created);
+#ifdef __ANDROID__
+        if (created) warm_pipeline_new(pp);  // (pipeline warm-up: counted in play, written to the route's list)
+        else if (pp->warmed && !pp->warm_used) pp->warm_used = true, warm_used_n++;
+#endif
         // Verification rebuilds the original key to detect missing invalidations during later device tests.
         if (hit && memcmp(&k, &last_pipeline->k, sizeof k)) {
             LOG("[vk] pipeline reuse: stale key detected\n");
@@ -7002,8 +7367,14 @@ static void draw_(CmdRec *r, bool indexed) {
         last_pipeline = pp;
         pipeline_dirty = false;
     }
+#ifdef __ANDROID__
+    if (keep && !atomic_load(&pp->state) && diag_in_gameplay()) w_waits++;
+#endif
     if (keep) wait_built(&pp->state);
     if (atomic_load(&pp->state) != 1) {
+#ifdef __ANDROID__
+        if (diag_in_gameplay()) w_skip_pipe++;
+#endif
         if (g_debug_frame) LOG("[draw]   skipped: pipeline %s\n", atomic_load(&pp->state) ? "failed" : "still building");
         if (!atomic_load(&pp->state)) stat_skipped_building++;
         stat_skipped++;

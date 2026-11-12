@@ -62,6 +62,7 @@ Settings g_settings = {
     .fg_mult = 0,
     .cbuf_inplace = false,
     .gcopy_range = false,
+    .pipe_warm = false,
     .fps_mode = 1,  // (30: the game's own choice dropped the overworld to 20, where the GPU's clocks settled low)
     .res_mode = 1,  // (1x: the Switch's 900p scene, the HUD at the screen's resolution - Match display drew the scene at
                     // 2560x1440 on the POCO F7 Ultra: 22 fps)
@@ -234,6 +235,7 @@ void settings_reset_defaults(void) {
     g_settings.fg_mult = d->fg_mult;
     g_settings.cbuf_inplace = d->cbuf_inplace;
     g_settings.gcopy_range = d->gcopy_range;
+    g_settings.pipe_warm = d->pipe_warm;
     g_settings.shader_int32 = d->shader_int32;
     g_settings.sync_lag = d->sync_lag;
     g_settings.native_code = d->native_code;
@@ -286,6 +288,7 @@ void settings_load(void) {
         else if (!strcmp(key, "framegen_multiplier")) g_settings.fg_mult = atoi(val) == 3 ? 1 : atoi(val) == 4 ? 2 : 0;
         else if (!strcmp(key, "cbuf_inplace")) g_settings.cbuf_inplace = atoi(val) != 0;
         else if (!strcmp(key, "gcopy_range")) g_settings.gcopy_range = atoi(val) != 0;
+        else if (!strcmp(key, "pipeline_warmup")) g_settings.pipe_warm = atoi(val) != 0;
         else if (!strcmp(key, "frame_rate")) g_settings.fps_mode = !strcmp(val, "30") ? 1 : !strcmp(val, "60") ? 2 : !strcmp(val, "20") ? 3 : !strcmp(val, "45") ? 4 : 0;
         else if (!strcmp(key, "shader_int32")) g_settings.shader_int32 = atoi(val) != 0;
         else if (!strcmp(key, "sync_lag")) g_settings.sync_lag = atoi(val) != 0;
@@ -401,7 +404,7 @@ void settings_save(void) {
             g_settings.fg_hud, g_settings.cbuf_inplace);
     fprintf(f, "shader_int32 = %d\nsync_lag = %d\nnative_code = %d\nfiles_in_place = %d\n", g_settings.shader_int32,
             g_settings.sync_lag, g_settings.native_code, g_settings.files_in_place);
-    fprintf(f, "gcopy_range = %d\n", g_settings.gcopy_range);
+    fprintf(f, "gcopy_range = %d\npipeline_warmup = %d\n", g_settings.gcopy_range, g_settings.pipe_warm);
     static const char *const tri[] = {"auto", "0", "1"};  // (-1 / 0 / 1)
 #define TRI(v) tri[(v) < 0 ? 0 : (v) ? 2 : 1]
     fprintf(f, "gpu_heap = %s\ninplace_reads = %s\nturnip_lrz = %s\nlog_file = %d\ngpu_model = %s\n", TRI(g_settings.gpu_heap),
