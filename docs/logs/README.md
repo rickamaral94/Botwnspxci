@@ -9,6 +9,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [Turnip e frame generation](2026-11-historico-odin2.md#turnip-e-frame-generation) | BOTW 1.8.2, Odin 2 Portal | Turnip Amaral v5.7.13.1 com LRZ ligado foi a configuração escolhida no trecho avaliado. |
 | [60 FPS e cache de vértices](2026-11-historico-odin2.md#60-fps-e-cache-de-vértices) | BOTW 1.8.2, Odin 2 Portal | 37,56 FPS reais na cena pesada a 1×. O ganho do cache experimental aguarda teste físico. |
 | [Upstream 0.3.4-beta-amaral.1](2026-11-historico-odin2.md#upstream-034-beta-amaral1) | Build e testes no host | APK e testes verificados no host. A validação em hardware segue pendente no relatório. |
+| [Revisão do repositório, 12/11](2026-11-12-revisao-repo.md) | Amaral.2, host | Sem perdas do upstream; merge do upstream registrado; testes no repositório (`tools/run_host_tests.sh`). O cache de vértices não age no Odin com o Turnip. |
 
 ## Revisões externas e Turnip
 
@@ -19,12 +20,14 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 ## Próxima rodada no Odin 2 Portal
 
 1. Comparar a build de referência e a candidata no Grande Platô, com o mesmo save, trajeto, versão do jogo, driver, resolução, cache aquecido, modo de energia e temperatura inicial comparável. Rodar A/B/A com framegen desligado e registrar FPS reais, p95/p99, 1% low e regressões visuais ou de física.
-2. Medir o cache de vértices em A/B/A dentro do mesmo APK, mudando apenas a opção experimental. Cruzar `[guest-copy-diag]` com frametime e correção da geometria.
-3. Se testar framegen, registrar o multiplicador e os FPS reais e apresentados separadamente. Repetir a rota e observar o HUD e a imagem em movimento.
+2. **Não** medir o cache de vértices no Odin com o Turnip: lá os vértices são lidos direto da memória do jogo e o cache não roda (`[guest-copy-diag]` mostra `vertex binds direct=` alto e `copied=` perto de zero). Medir onde há cópia: driver da Qualcomm, Mali, ou o Turnip com "Memória do jogo na GPU" desligada ([revisão de 12/11](2026-11-12-revisao-repo.md)).
+3. Comparar taxa de quadros 40 sem framegen, framegen 3x (40 → 120) e framegen 2x, como no [plano de 12/11](2026-11-12-revisao-repo.md#conclusão-e-próximo-passo).
+4. Se testar framegen, registrar o multiplicador e os FPS reais e apresentados separadamente. Repetir a rota e observar o HUD e a imagem em movimento.
 
 ## Como registrar e revisar
 
 - Crie `AAAA-MM-DD-build-cenario.md` a partir do [modelo](MODELO.md) e acrescente uma linha ao índice. Acrescente novas rodadas ao registro do mesmo experimento e date qualquer revisão de conclusão.
 - Identifique **medição no aparelho**, **relato do jogador**, **verificação no host** e **hipótese**. Cite o nome do log, a janela ou o marcador relevante e o trecho de `[diag] summary` quando houver. Indique as condições que limitam a comparação.
 - Mantenha os logs brutos com Amaral. No Git, use métricas resumidas e referências às capturas, sem dados pessoais, credenciais ou arquivos do jogo.
+- Testes no host: `tools/run_host_tests.sh` (os que não pedem aparelho, NDK nem extras do Python).
 - Claude e Codex consultam este índice antes de repetir um teste. Registrem o parecer, a evidência conferida e as pendências. Na issue ou no PR relacionado, incluam o caminho do registro e o commit.

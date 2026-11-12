@@ -31,3 +31,18 @@ Assinatura: o Gradle busca `~/.botwrecompandroid/keystore.properties` (`storeFil
 5. Registrar métricas A/B/BA e regressões visuais na documentação; manter 60 FPS nativos e frame generation como métricas distintas.
 
 **Estado:** código e build prontos para revisão e teste físico. Ganho de performance, 60 FPS sustentados e atualização sobre a instalação existente seguem **não comprovados**.
+
+## Revisão do Claude (12/11/2026)
+
+- **Cache de faixas:**
+  - a invalidação por escrita, a capacidade em potência de 2 até 1 MB e a troca da opção em jogo (que limpa o cache)
+    estão corretas;
+  - o prefixo é copiado num momento e a cauda em outro, dentro da mesma submissão, e por isso pode misturar dados se
+    o jogo escrever no meio; a cópia exata que já existia tem o mesmo risco.
+- **Onde age:**
+  - só nos vértices copiados (`guest_copy`);
+  - no Odin com o Turnip, o heap fica na GPU (`guest_direct`) e o cache não roda, então o A/B/A do item 2 não mede
+    nada lá;
+  - o teste vai para o driver da Qualcomm, Mali ou o Turnip com "Memória do jogo na GPU" desligada.
+  - O `[guest-copy-diag]` agora mostra `vertex binds direct=` e `copied=`.
+- Detalhes em [`logs/2026-11-12-revisao-repo.md`](logs/2026-11-12-revisao-repo.md).

@@ -1157,6 +1157,9 @@ static int gcopy_nactive;
 static uint64_t gcopy_active_seq;
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
 static uint64_t gcopy_copied, gcopy_reused, gcopy_grow_saved, gcopy_grow_appends;
+// (the vertex buffers bound straight from the game's memory on the GPU - Turnip's placed heap: the range reuse never
+// sees those, only copied ones; [guest-copy-diag] says how many of each, so an A/B shows whether it ran at all)
+static uint64_t gcopy_vtx_direct, gcopy_vtx_copied;
 static int gcopy_range_mode = -1;
 static int gcopy_range_env = -1;
 static void guest_copy_flush(void) { gcopy_gen++; gcopy_nactive = 0; }
@@ -1457,14 +1460,16 @@ const char *renderer_stats(void) {
              (unsigned long long)stat_dispatches, (unsigned long long)stat_dchained, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              compiles, (double)stat_build_wait_ns / 1e6, (unsigned long long)stat_feedback_copies, (unsigned long long)stat_feedback_reads, (unsigned long long)stat_inplace_breaks, (double)stat_upload_bytes / 1048576.0,
              (unsigned long long)stat_pipe_binds, (unsigned long long)stat_set_binds);
-    LOG("[guest-copy-diag] mode=%d copied=%.2fMB reused=%.2fMB grow_saved=%.2fMB tail_appends=%llu; same renderer interval\n",
+    LOG("[guest-copy-diag] mode=%d copied=%.2fMB reused=%.2fMB grow_saved=%.2fMB tail_appends=%llu; vertex binds direct=%llu "
+        "copied=%llu; same renderer interval\n",
         gcopy_range_mode > 0, gcopy_copied / 1048576.0, gcopy_reused / 1048576.0,
-        gcopy_grow_saved / 1048576.0, (unsigned long long)gcopy_grow_appends);
+        gcopy_grow_saved / 1048576.0, (unsigned long long)gcopy_grow_appends, (unsigned long long)gcopy_vtx_direct,
+        (unsigned long long)gcopy_vtx_copied);
     LOG("[pipeline-wait-diag] spin_us=%llu waits=%llu ready_while_spinning=%llu wait_ms=%.3f\n",
         (unsigned long long)(build_wait_spin_ns() / 1000), (unsigned long long)stat_build_wait_count,
         (unsigned long long)stat_build_wait_spin_count, (double)stat_build_wait_ns / 1e6);
     stat_build_wait_count = stat_build_wait_spin_count = 0;
-    gcopy_copied = gcopy_reused = gcopy_grow_saved = gcopy_grow_appends = 0;
+    gcopy_copied = gcopy_reused = gcopy_grow_saved = gcopy_grow_appends = gcopy_vtx_direct = gcopy_vtx_copied = 0;
     stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
         LOG("[cbuf] fixed %llu x %.1f KB, dynamic %llu x %.1f KB; copied %.1f MB; in place, patched %llu\n",
@@ -7273,6 +7278,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 continue;
             }
             if (v.addr && v.size && guest_direct(v.addr, v.size, &dbuf, &doff)) {
+                gcopy_vtx_direct++;
                 if (ss_on && (ss.vb_known >> s & 1) && ss.vb[s] == dbuf && ss.vo[s] == doff) continue;
                 ss.vb[s] = dbuf; ss.vo[s] = doff; ss.vb_known |= 1u << s;
                 vkCmdBindVertexBuffers(cb, (uint32_t)s, 1, &dbuf, &doff);
@@ -7291,7 +7297,7 @@ static void draw_(CmdRec *r, bool indexed) {
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
             if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }
-            else sp = guest_copy(v.addr, need ? need : 16, true);
+            else sp = guest_copy(v.addr, need ? need : 16, true), gcopy_vtx_copied++;
         }
         VkDeviceSize off = sp.off;
         if (ss_on && (ss.vb_known >> s & 1) && ss.vb[s] == sp.buf && ss.vo[s] == off) continue;

@@ -43,7 +43,8 @@ Começar com framegen desligado.
    `LARECOMP_PIPELINE_WAIT_SPIN=1`, primeiro com cache quente. Medir contagem e
    duração das esperas, p99, CPU render, temperatura e integridade do terreno.
    Separar a coleta de cache frio.
-4. **Cache de vértices:** a opção experimental da Amaral.1 continua disponível.
+4. **Cache de vértices:** a opção experimental da Amaral.1 continua disponível. No Odin com o Turnip ela não roda,
+   porque os vértices são lidos direto da memória do jogo. Ver a [revisão de 12/11](2026-11-12-revisao-repo.md).
    Comparar separadamente conforme a [revisão anterior](2026-11-11-revisao-externa.md).
 
 Se a diferença persistir variando apenas o driver, registrar a coleta na
@@ -53,7 +54,7 @@ Se a diferença persistir variando apenas o driver, registrar a coleta na
 
 - Fonte compilada: [`b8dd4533533e`](https://github.com/rickamaral94/Botwnspxci/commit/b8dd4533533ec62f078a1b8ef8be4a4897f6d3f0).
 - `assembleRelease` e `lintVitalRelease` passaram com JDK 17, SDK 36, NDK r30 e CMake 3.30.4.
-- Testes no host passaram para cache compute com 768 endereços, falha de alocação na expansão, recência e descarte de faixas e ambos os modos de espera. Passaram também os testes de compilação do jogo, RomFS e cache de shaders.
+- Testes no host passaram para cache compute com 768 endereços (no repositório desde 12/11: `tools/test_exec_caches.py`, e todos os de host em `tools/run_host_tests.sh`), falha de alocação na expansão, recência e descarte de faixas e ambos os modos de espera. Passaram também os testes de compilação do jogo, RomFS e cache de shaders.
 - O teste legado de cache de uploads falha ao extrair código que depende de símbolos ausentes no harness. O trecho extraído é idêntico na Amaral.1 e na Amaral.2.
 - APK final `BOTW-0.3.4-beta-amaral.2-arm64.apk`, 90.772.564 bytes, SHA-256 `8cd3ebfae2a1398652c4ae1294ac8a1359f2a3f740a0565aa268ebee4eab4062`. ZIP, alinhamento, pacote, versão e ABI conferidos. Assinatura v3 com o certificado fixo BOTWDroid Amaral.
 - Validação de instalação e gameplay no Odin 2 pendente.

@@ -6,6 +6,12 @@ desligado.
 
 Medições com "Medir desempenho (60 s)" (`runtime/diag.c`), no mesmo trecho pesado (a margem do lago, de dia).
 
+> **Atualização (12/11):**
+> - a referência atual do Turnip é a Amaral **v5.8.17.1** (registro de 04/11: 37,6 quadros reais na cena pesada a 1x,
+>   framegen desligado);
+> - a comparação do LRZ abaixo mudou também a resolução, e o ganho isolado dele está pendente;
+> - ver [`logs/TURNIP.md`](logs/TURNIP.md) e [`logs/2026-11-12-revisao-repo.md`](logs/2026-11-12-revisao-repo.md).
+
 ## Drivers
 
 | Driver | LRZ | Resolução | Quadros reais/s | Tela p50 / p95 / p99 | GPU por quadro real | Situação |
