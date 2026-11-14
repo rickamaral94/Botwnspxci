@@ -18,6 +18,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 - [11/11 — Amaral.2, mudanças vindas de outros ports e testes](2026-11-11-amaral2-cross-port.md)
 - [11/11 — outros ports e experimentos para o BOTW](2026-11-11-revisao-externa.md)
 - [Turnip — evidências para o Amaral Adreno Tools](TURNIP.md)
+- [Campainha do agente Turnip — como pedir ajuste ou análise do driver](CAMPAINHA-TURNIP.md)
 
 ## Próxima rodada no Odin 2 Portal
 
