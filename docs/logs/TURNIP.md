@@ -1,5 +1,7 @@
 # Turnip — evidências para o Amaral Adreno Tools
 
+Para pedir ajuste ou análise do driver ao agente Turnip, use a [campainha](CAMPAINHA-TURNIP.md).
+
 Use este tópico para relacionar cada atualização do Turnip aos resultados no BOTW. Referencie o registro completo da rodada. A qualificação do driver segue o [registro em hardware](https://github.com/rickamaral94/Amaral-Adreno-Tools/blob/main/docs/tests/README.md) e a [política de evidência](https://github.com/rickamaral94/Amaral-Adreno-Tools/blob/main/docs/EVIDENCE-POLICY.md) do Amaral Adreno Tools.
 
 ## Evidência disponível
