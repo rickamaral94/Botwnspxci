@@ -270,6 +270,16 @@ static int f_n, f_ncomp, f_nmenu;
 static uint64_t f_last, f_last_gpu, f_next_stats, f_next_block;
 #define CL 8
 static uint32_t cl_min[CL], cl_max[CL];
+static uint32_t gpu_mhz_min, gpu_mhz_max;  // (the GPU's clock where readable: PlatDeviceStats.gpu_mhz)
+static uint64_t gpu_mhz_sum;
+static int gpu_mhz_n;
+// The timeline every 2 s (for the driver's evidence, docs/logs/CAMPAINHA-TURNIP.md M4): real and presented frames a
+// second, the screen's p50 / p95 / p99, GPU and CPU (main, render) per real frame, the clocks and the heat
+typedef struct { float t, real, shown, p50, p95, p99, gpu, mcpu, rcpu, temp; uint32_t gpu_mhz, cl[3]; } TlRow;
+static TlRow tl[96];
+static int tl_n, tl_f, tl_shown;
+static uint64_t tl_rf, tl_rf_ns, tl_t0, tl_last;
+static int cmp_u64(const void *a, const void *b);
 static uint64_t cl_sum[CL];
 static int cl_n, cl_samples;
 static float temp_min = 1e9f, temp_max = -1e9f, headroom_min = 1e9f;
@@ -301,6 +311,8 @@ void diag_request(int seconds) {
     if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
     memset(ab_cl_sum, 0, sizeof ab_cl_sum), memset(ab_cl_samples, 0, sizeof ab_cl_samples);
     memset(ab_real, 0, sizeof ab_real), memset(ab_ns, 0, sizeof ab_ns), ab_t = 0, rf_n = rf_ns = 0;
+    gpu_mhz_min = gpu_mhz_max = 0, gpu_mhz_sum = 0, gpu_mhz_n = 0;
+    tl_n = tl_f = tl_shown = 0, tl_rf = tl_rf_ns = tl_t0 = tl_last = 0;
     g_seconds = seconds > 0 ? seconds : 60;
     atomic_store(&win_t0, ~0ull);
     atomic_store(&win_t1, ~0ull);
@@ -426,6 +438,40 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         }
         if (g_diag_ab >= 0) ab_cl_samples[g_diag_ab]++;
         cl_samples++;
+        if (ds.gpu_mhz) {
+            if (!gpu_mhz_n || ds.gpu_mhz < gpu_mhz_min) gpu_mhz_min = ds.gpu_mhz;
+            if (ds.gpu_mhz > gpu_mhz_max) gpu_mhz_max = ds.gpu_mhz;
+            gpu_mhz_sum += ds.gpu_mhz, gpu_mhz_n++;
+        }
+        if (tl_last && tl_n < (int)(sizeof tl / sizeof tl[0])) {  // (this 2 s: since the previous sample)
+            TlRow *r = &tl[tl_n++];
+            memset(r, 0, sizeof *r);
+            double dt = (now - tl_last) / 1e9;
+            uint64_t real = rf_n - tl_rf;
+            r->t = (float)((now - tl_t0) / 1e9);
+            r->real = rf_ns > tl_rf_ns ? (float)(real * 1e9 / (double)(rf_ns - tl_rf_ns)) : 0;
+            r->shown = dt > 0 ? (float)((f_n - tl_f) / dt) : 0;
+            int ns = f_nshown - tl_shown;
+            if (ns > 0) {
+                uint64_t *c = malloc(sizeof *c * (size_t)ns);
+                if (c) {
+                    memcpy(c, f_shown + tl_shown, sizeof *c * (size_t)ns);
+                    qsort(c, (size_t)ns, sizeof *c, cmp_u64);
+                    r->p50 = c[ns / 2] / 1e6f, r->p95 = c[(size_t)(ns * 0.95)] / 1e6f, r->p99 = c[(size_t)(ns * 0.99)] / 1e6f;
+                    free(c);
+                }
+            }
+            double g = 0, m = 0, rc = 0;
+            for (int i = tl_f; i < f_n; i++) g += f_gpu[i], m += f_mcpu[i], rc += f_rcpu[i];
+            if (real) r->gpu = (float)(g / 1e6 / real), r->mcpu = (float)(m / 1e6 / real), r->rcpu = (float)(rc / 1e6 / real);
+            r->gpu_mhz = ds.gpu_mhz, r->temp = ds.soc_temp_c;
+            for (int i = 0; i < 3 && i < cl_n; i++) r->cl[i] = ds.cluster_mhz[i];
+            LOG("[diag] t+%.0fs: real %.1f/s shown %.1f/s screen p50 %.1f p95 %.1f p99 %.1f ms | per real frame GPU %.2f ms, "
+                "CPU main %.2f render %.2f ms | GPU %u MHz, CPU %u/%u/%u MHz, SoC %.0f C\n", r->t, r->real, r->shown, r->p50,
+                r->p95, r->p99, r->gpu, r->mcpu, r->rcpu, r->gpu_mhz, r->cl[0], r->cl[1], r->cl[2], r->temp);
+        }
+        if (!tl_t0) tl_t0 = now;
+        tl_last = now, tl_f = f_n, tl_shown = f_nshown, tl_rf = rf_n, tl_rf_ns = rf_ns;
         if (ds.soc_temp_c > 0) {
             if (ds.soc_temp_c < temp_min) temp_min = ds.soc_temp_c;
             if (ds.soc_temp_c > temp_max) temp_max = ds.soc_temp_c;
@@ -699,6 +745,12 @@ static void *report_main(void *arg) {
             vk_warm_summary(pw, sizeof pw);
             out("pipelines: %s", pw);
         }
+        {   // (vulkan/device.c: the driver file, the system, the effective paths and caches - the driver's evidence)
+            extern void vk_diag_details(char *buf, size_t n);
+            char d[1400];
+            vk_diag_details(d, sizeof d);
+            out("details: %s", d);
+        }
 #endif
         double gpu = 0;
         for (int i = 0; i < f_n; i++) if (f_flags[i] & 1) gpu += f_gpu[i] / 1e6;
@@ -719,8 +771,9 @@ static void *report_main(void *arg) {
                 o += snprintf(cl + o, sizeof cl - (size_t)o, "%s%llu", i ? "/" : "", (unsigned long long)(cl_sum[i] / (uint64_t)cl_samples));
         }
         out("summary: %.2f real frames a second | screen p50 %.2f p95 %.2f p99 %.2f ms | GPU %.2f ms per real frame | "
-            "CPU clusters %s MHz | SoC %.0f-%.0f C",
-            rf_ns ? rf_n * 1e9 / rf_ns : 0.0, p50, p95, p99, rf_n ? gpu / (double)rf_n : 0.0, cl,
+            "GPU %llu MHz | CPU clusters %s MHz | SoC %.0f-%.0f C",
+            rf_ns ? rf_n * 1e9 / rf_ns : 0.0, p50, p95, p99, rf_n ? gpu / (double)rf_n : 0.0,
+            (unsigned long long)(gpu_mhz_n ? gpu_mhz_sum / (uint64_t)gpu_mhz_n : 0), cl,
             temp_max > -1e8f ? temp_min : 0.0f, temp_max > -1e8f ? temp_max : 0.0f);
     }
     out("-- frames (the time between two vkQueuePresentKHR on the render thread)");
@@ -782,7 +835,18 @@ static void *report_main(void *arg) {
                           (unsigned long long)(cl_sum[i] / (uint64_t)cl_samples), cl_max[i]);
         out("%s", line);
     } else out("CPU clusters: n/a");
+    if (gpu_mhz_n) out("GPU clock MHz (min / mean / max): %u / %llu / %u", gpu_mhz_min,
+                       (unsigned long long)(gpu_mhz_sum / (uint64_t)gpu_mhz_n), gpu_mhz_max);
+    else out("GPU clock: n/a (not readable by the app on this kernel)");
     if (temp_max > -1e8f) out("SoC temperature %.0f-%.0f C", temp_min, temp_max); else out("SoC temperature: n/a");
+    if (tl_n) {
+        out("-- timeline (every 2 s: real / presented frames a second, the screen's p50 / p95 / p99 ms, per real frame GPU / "
+            "CPU main / CPU render ms, GPU MHz, CPU clusters MHz, SoC C)");
+        for (int i = 0; i < tl_n; i++)
+            out("t+%3.0fs %5.1f %5.1f | %5.1f %5.1f %5.1f | %5.2f %5.2f %5.2f | %4u | %u/%u/%u | %.0f", tl[i].t, tl[i].real,
+                tl[i].shown, tl[i].p50, tl[i].p95, tl[i].p99, tl[i].gpu, tl[i].mcpu, tl[i].rcpu, tl[i].gpu_mhz, tl[i].cl[0],
+                tl[i].cl[1], tl[i].cl[2], tl[i].temp);
+    }
     if (thermal_max >= 0) out("Android thermal status (max): %d", thermal_max); else out("Android thermal status: n/a");
     if (headroom_min < 1e8f) out("thermal headroom (min): %.2f", headroom_min); else out("thermal headroom: n/a");
     out("-- threads (wall time in exclusive categories; the busiest first)");
@@ -868,6 +932,16 @@ static void *report_main(void *arg) {
             LOG("[diag] report copied to %s\n", copy);
         }
         if (in) fclose(in);
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+        {   // (the GPU driver's own lines in logcat - TU_DEBUG=perf, its warnings - beside the report: the driver's evidence)
+            extern int plat_driver_logcat(const char *path);
+            char lc[1200];
+            snprintf(lc, sizeof lc, "%.*s-%04d%02d%02d-%02d%02d%02d-driver-logcat.txt", stem, path, tm.tm_year + 1900, tm.tm_mon + 1,
+                     tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+            int n = plat_driver_logcat(lc);
+            LOG("[diag] the driver's logcat lines: %d -> %s\n", n, n >= 0 ? lc : "(logcat unreadable)");
+        }
+#endif
     }
     // (the sampler stays installed, its timers stopped; the hooks stop counting)
     for (int i = 0; i < ns && i < SLOTS; i++)

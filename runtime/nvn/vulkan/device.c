@@ -20,10 +20,16 @@
 #include "timing_trace.h"
 #include "device_compat.h"
 #include "../output_scale.h"
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#include <sys/utsname.h>
+#endif
 #include "../renderer.h"
 
 VkG g_vk;
 static char g_vk_driver_desc[400] = "?";  // (vk_diag_context: the driver package and its own name / version)
+size_t g_vk_pcache_start;  // (the pipeline cache read at the start, bytes: 0 = cold - vk_diag_details)
+static uint32_t g_vk_driver_id, g_vk_api;
 static SDL_Window *window;
 static atomic_bool ui_ready;
 static VkDebugUtilsMessengerEXT messenger;
@@ -697,6 +703,7 @@ static void create_device(void) {
             snprintf(pkg, sizeof pkg, "%.*s", (int)(slash - b), b);
         }
         snprintf(g_vk_driver_desc, sizeof g_vk_driver_desc, "%s (%s %s)", pkg, driver.driverName, driver.driverInfo);
+        g_vk_driver_id = (uint32_t)driver.driverID, g_vk_api = g_vk.props.apiVersion;
         for (char *c = g_vk_driver_desc; *c; c++)  // (Qualcomm's info runs over several lines: one line in the report)
             if (*c == '\n' || *c == '\r') *c = ' ';
     }
@@ -945,6 +952,7 @@ static void create_device(void) {
     size_t sz = 0;
     void *data = NULL;
     FILE *fp = getenv("LARECOMP_VK_NO_PIPELINE_CACHE") ? NULL : fopen("cache/vk_pipelines.bin", "rb");
+    extern size_t g_vk_pcache_start;
     if (fp) {
 #ifdef __ANDROID__  // (a size cap and the public header checked: a file from another driver or a cut-off write)
         long length = -1;
@@ -965,6 +973,7 @@ static void create_device(void) {
 #endif
         fclose(fp);
     }
+    g_vk_pcache_start = sz;
     VkPipelineCacheCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = sz,
                                     .pInitialData = data};
     if (vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache) != VK_SUCCESS) {
@@ -2087,6 +2096,40 @@ bool vk_turnip_heap_on(int setting) {
     return g_vk.map_placed && vk_driver_is_turnip();
 }
 static bool g_lrz_at_start = true;
+// (diag.c) the rest the driver's evidence asks for (docs/logs/CAMPAINHA-TURNIP.md M1-M3): the driver file's SHA-256
+// and build id, its Vulkan driver id and API; the system (Android, kernel, phone, SoC, KGSL's GPU model, the chip id
+// Turnip reports as the device id); the effective Driver compatibility paths, anti-aliasing, upscaler, the driver's
+// own variables and whether the caches were warm
+void vk_diag_details(char *buf, size_t n) {
+    extern const char *vk_driver_sha256(void), *vk_driver_build_id(void), *vk_gmem_desc(void), *vk_inplace_desc(void);
+    extern uint64_t vk_spirv_misses(void);
+    extern const char *vk_driver_env_at_start(void);
+    char rel[PROP_VALUE_MAX] = "", sdk[PROP_VALUE_MAX] = "", model[PROP_VALUE_MAX] = "", soc[PROP_VALUE_MAX] = "";
+    __system_property_get("ro.build.version.release", rel);
+    __system_property_get("ro.build.version.sdk", sdk);
+    __system_property_get("ro.product.model", model);
+    __system_property_get("ro.soc.model", soc);
+    struct utsname u;
+    if (uname(&u)) snprintf(u.release, sizeof u.release, "?");
+    char kgsl[64] = "";
+    FILE *f = fopen("/sys/class/kgsl/kgsl-3d0/gpu_model", "r");
+    if (f) {
+        if (!fgets(kgsl, sizeof kgsl, f)) kgsl[0] = 0;
+        fclose(f);
+        kgsl[strcspn(kgsl, "\r\n")] = 0;
+    }
+    static const char *aa[] = {"off", "SMAA", "FXAA"}, *up[] = {"bilinear", "MetalFX", "FSR 1", "SGSR 1"};
+    snprintf(buf, n, "driver file sha256 %s build-id %s, driverID %u, API %u.%u.%u | Android %s (API %s), kernel %s, %s, "
+             "SoC %s, KGSL %s, chip id 0x%08x | GPU memory %s, in-place target reads %s, AA %s, upscaler %s, driver "
+             "variables \"%s\" (TU_DEBUG \"%s\") | pipeline cache at start %zu KB (%s), SPIR-V cache misses so far %llu",
+             vk_driver_sha256()[0] ? vk_driver_sha256() : "- (system driver)", vk_driver_build_id()[0] ? vk_driver_build_id() : "-",
+             g_vk_driver_id, VK_API_VERSION_MAJOR(g_vk_api), VK_API_VERSION_MINOR(g_vk_api), VK_API_VERSION_PATCH(g_vk_api),
+             rel[0] ? rel : "?", sdk[0] ? sdk : "?", u.release, model[0] ? model : "?", soc[0] ? soc : "?", kgsl[0] ? kgsl : "?",
+             g_vk.props.deviceID, vk_gmem_desc(), vk_inplace_desc(),
+             g_settings.antialias >= 0 && g_settings.antialias <= 2 ? aa[g_settings.antialias] : "?",
+             g_settings.upscaler >= 0 && g_settings.upscaler <= 3 ? up[g_settings.upscaler] : "?", vk_driver_env_at_start(), getenv("TU_DEBUG") ? getenv("TU_DEBUG") : "",
+             g_vk_pcache_start / 1024, g_vk_pcache_start ? "warm" : "cold", (unsigned long long)vk_spirv_misses());
+}
 // (diag.c) what the measurement ran with: the driver and the settings that move the GPU's work
 void vk_diag_context(char *buf, size_t n) {
     extern double output_scale_dynamic_factor(void);

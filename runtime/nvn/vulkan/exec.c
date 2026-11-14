@@ -807,7 +807,21 @@ static void dl_note(const char *fmt, ...) {
     va_end(ap);
 }
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { dl_note("  upload %p %ux%u lv%u", img, w, h, lv); }
+// The render thread's last GPU step, always kept (two stores a pass, a submission or a dispatch): what the GPU had been
+// given when the device was lost or the app crashed - the driver's evidence (docs/logs/CAMPAINHA-TURNIP.md M7)
+static const char *volatile g_last_op = "none yet";
+static volatile uint64_t g_last_op_frame, g_last_op_seq;
+static inline void last_op(const char *what) { g_last_op = what, g_last_op_frame = renderer_present_count(); }
+void vk_last_op_desc(char *out, size_t n) {
+    snprintf(out, n, "%s, frame %llu, submission %llu", g_last_op, (unsigned long long)g_last_op_frame,
+             (unsigned long long)g_last_op_seq);
+}
 void vk_devlost_dump(void) {
+    {
+        char d[160];
+        vk_last_op_desc(d, sizeof d);
+        LOG("[vk] last GPU step recorded: %s\n", d);
+    }
     if (!dl_on) return;
     LOG("[vk] last GPU operations before the device loss (oldest first):\n");
     for (unsigned i = dl_n > 64 ? dl_n - 64 : 0; i < dl_n; i++) LOG("[vk]   %s\n", dl_ring[i & 63]);
@@ -888,6 +902,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     {
         PROF_T0();
         dl_note("submit %llu", (unsigned long long)submit_seq + 1);
+        last_op(wait || signal ? "submit (present)" : "submit"), g_last_op_seq = submit_seq + 1;
 #ifdef __ANDROID__
         uint64_t trace_start = vk_timing_trace_on() ? SDL_GetTicksNS() : 0;
 #endif
@@ -2033,6 +2048,7 @@ uint64_t vk_scene_frame(void) { return g_scene_frame; }
 static VkRect2D scissor_rect(void);
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
+    last_op("begin a pass");
     pipeline_dirty = true;
     vk_end_pass();
     if (st.rt.depth && st.rt.ncolor >= 3 && st.rt.color[0] && vk_texture_scale_group(st.rt.color[0]) == RS_SCENE) {
@@ -4499,6 +4515,13 @@ static bool cbwin_bind(int stage, int k, uint64_t addr, uint64_t size, VkDescrip
     return true;
 }
 static bool gmem_placed_(void) { return gmem_placed; }
+// (device.c vk_diag_details: the effective Driver compatibility paths, for the driver's evidence)
+const char *vk_gmem_desc(void) {
+    return gmem_placed ? (gwin_mode ? "on (placed, windows)" : "on (placed)") : gcopy_mode ? "off (CPU copies)" : "off";
+}
+const char *vk_inplace_desc(void) {
+    return g_inplace_copy < 0 ? "not decided yet" : g_inplace_copy ? "off (copies)" : "on (in place)";
+}
 static uint64_t cbwin_row_(uint64_t addr, uint64_t size) { return cbwin_rows(addr, size); }
 #endif
 
@@ -6415,6 +6438,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL, NULL, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
+    last_op("dispatch");
     vkCmdDispatch(cb, gx, gy, gz);
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) gfast_finish(cb);
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5), note_gmem_store(5);

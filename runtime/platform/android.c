@@ -27,6 +27,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <unwind.h>
+#include <link.h>
 
 #include "../paths.h"
 #include "../platform.h"
@@ -518,7 +519,70 @@ static _Unwind_Reason_Code trace_step(struct _Unwind_Context *ctx, void *arg) {
     return t->n < t->max ? _URC_NO_REASON : _URC_END_OF_STACK;
 }
 
+// This process's lines from the GPU driver and its loader in logcat (Mesa / Turnip, freedreno, the Vulkan loader,
+// adrenotools) into a file - what TU_DEBUG=perf and the driver's warnings print go to logcat, not to the app's log
+// (docs/logs/CAMPAINHA-TURNIP.md M6). An app may read its own process's lines. Returns the lines written, -1 failed.
+int plat_driver_logcat(const char *path) {
+    char cmd[96];
+    snprintf(cmd, sizeof cmd, "logcat -d -v threadtime --pid=%d 2>/dev/null", (int)getpid());
+    FILE *in = popen(cmd, "r"), *out = in ? fopen(path, "w") : NULL;
+    if (!out) { if (in) pclose(in); return -1; }
+    static const char *const tags[] = {" TU", " MESA", " Mesa", " mesa", " freedreno", " vulkan", " Vulkan", " libvulkan",
+                                       " adrenotools", " Adreno", " kgsl", " AdrenoVK"};
+    char line[2048];
+    int n = 0;
+    while (fgets(line, sizeof line, in)) {
+        const char *colon = strstr(line, ": ");  // (threadtime: date time pid tid prio tag: message)
+        if (!colon) continue;
+        bool keep = false;
+        for (unsigned i = 0; i < sizeof tags / sizeof tags[0] && !keep; i++) {
+            const char *t = strstr(line, tags[i]);
+            keep = t && t < colon;
+        }
+        if (keep) fputs(line, out), n++;
+    }
+    pclose(in);
+    fclose(out);
+    return n;
+}
+
+// A loaded module's GNU build id (hex), from its PT_NOTE in memory: the backtrace names it with each module, so an
+// offset in the GPU driver or the game library can be symbolized against that exact file (docs/logs/CAMPAINHA-TURNIP.md M7)
+typedef struct { uintptr_t base; char *out; } BidAsk;
+static int bid_step(struct dl_phdr_info *info, size_t size, void *arg) {
+    (void)size;
+    BidAsk *a = arg;
+    if ((uintptr_t)info->dlpi_addr != a->base) return 0;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_NOTE) continue;
+        const uint8_t *p = (const uint8_t *)(info->dlpi_addr + ph->p_vaddr), *end = p + ph->p_memsz;
+        while (p + sizeof(ElfW(Nhdr)) <= end) {
+            const ElfW(Nhdr) *nh = (const ElfW(Nhdr) *)p;
+            const uint8_t *name = p + sizeof *nh, *desc = name + ((nh->n_namesz + 3) & ~3u);
+            if (desc + nh->n_descsz > end) break;
+            if (nh->n_type == NT_GNU_BUILD_ID && nh->n_namesz == 4 && !memcmp(name, "GNU", 4)) {
+                for (uint32_t k = 0; k < nh->n_descsz && k < 20; k++) snprintf(a->out + k * 2, 3, "%02x", desc[k]);
+                return 1;
+            }
+            p = desc + ((nh->n_descsz + 3) & ~3u);
+        }
+    }
+    return 1;
+}
+static void module_build_id(const void *base, char out[41]) {
+    out[0] = 0;
+    BidAsk a = {(uintptr_t)base, out};
+    if (base) dl_iterate_phdr(bid_step, &a);
+}
+
 void plat_print_backtrace(void) {
+    {   // (the GPU's last step on the render thread: vulkan/exec.c)
+        extern void vk_last_op_desc(char *out, size_t n);
+        char d[160];
+        vk_last_op_desc(d, sizeof d);
+        fprintf(stderr, "  last GPU step recorded: %s\n", d);
+    }
     void *bt[64];
     Trace t = {bt, 0, 64};
     _Unwind_Backtrace(trace_step, &t);
@@ -533,9 +597,12 @@ void plat_print_backtrace(void) {
         if (!s && ours) s = rt_host_fn_name(pc, &off);
         const char *mod = di.dli_fname ? (strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname) : "?";
         uint64_t moff = pc - (uint64_t)(uintptr_t)di.dli_fbase;
-        if (s) fprintf(stderr, "  #%-2d %016llx %s+%llx (%s+%llx)\n", i, (unsigned long long)pc, s, (unsigned long long)off,
-                       mod, (unsigned long long)moff);
-        else fprintf(stderr, "  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, mod, (unsigned long long)moff);
+        char bid[41];
+        module_build_id(di.dli_fbase, bid);
+        if (s) fprintf(stderr, "  #%-2d %016llx %s+%llx (%s+%llx%s%s)\n", i, (unsigned long long)pc, s, (unsigned long long)off,
+                       mod, (unsigned long long)moff, bid[0] ? " build-id " : "", bid);
+        else fprintf(stderr, "  #%-2d %016llx %s+%llx%s%s\n", i, (unsigned long long)pc, mod, (unsigned long long)moff,
+                     bid[0] ? " build-id " : "", bid);
     }
 }
 
@@ -752,6 +819,8 @@ static uint64_t read_u64(const char *path) {
 static char g_policy[8][96];
 static int g_npolicy = -1;
 static char g_tzone[96];  // a readable SoC / CPU temperature (most aren't readable by apps)
+static char g_gpuclk[96];  // a readable GPU clock (KGSL), in Hz or MHz: g_gpuclk_mhz
+static bool g_gpuclk_mhz;
 
 static void find_sources(void) {
     if (g_npolicy >= 0) return;
@@ -784,7 +853,15 @@ static void find_sources(void) {
         int score = strstr(type, "cpu") ? 3 : strstr(type, "soc") || strstr(type, "aoss") ? 2 : 1;
         if (score > best) { best = score; snprintf(g_tzone, sizeof g_tzone, "%s", path); }
     }
-    fprintf(stderr, "[perf] %d CPU clusters, temperature from %s\n", g_npolicy, g_tzone[0] ? g_tzone : "(none readable)");
+    {   // (the GPU's clock: KGSL's current frequency in Hz, its devfreq's, or clock_mhz - whichever this kernel lets an
+        // app read; for the driver's evidence, docs/logs/CAMPAINHA-TURNIP.md M4)
+        static const struct { const char *p; bool mhz; } clk[] = {{"/sys/class/kgsl/kgsl-3d0/gpuclk", false},
+            {"/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq", false}, {"/sys/class/kgsl/kgsl-3d0/clock_mhz", true}};
+        for (unsigned i = 0; i < sizeof clk / sizeof clk[0] && !g_gpuclk[0]; i++)
+            if (read_u64(clk[i].p)) snprintf(g_gpuclk, sizeof g_gpuclk, "%s", clk[i].p), g_gpuclk_mhz = clk[i].mhz;
+    }
+    fprintf(stderr, "[perf] %d CPU clusters, temperature from %s, GPU clock from %s\n", g_npolicy, g_tzone[0] ? g_tzone : "(none readable)",
+            g_gpuclk[0] ? g_gpuclk : "(none readable)");
 }
 
 void plat_device_stats(PlatDeviceStats *out) {
@@ -795,6 +872,7 @@ void plat_device_stats(PlatDeviceStats *out) {
     out->ncluster = g_npolicy;
     for (int i = 0; i < g_npolicy; i++) out->cluster_mhz[i] = (uint32_t)(read_u64(g_policy[i]) / 1000);
     out->soc_temp_c = g_tzone[0] ? (float)read_u64(g_tzone) / 1000.0f : -1;
+    out->gpu_mhz = g_gpuclk[0] ? (uint32_t)(g_gpuclk_mhz ? read_u64(g_gpuclk) : read_u64(g_gpuclk) / 1000000) : 0;
     // this process's CPU time since the last call, as a share of every core
     static uint64_t last_ticks, last_ns;
     char buf[1024] = {0};

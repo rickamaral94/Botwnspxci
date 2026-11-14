@@ -85,6 +85,7 @@ typedef struct {
     int thermal;                   // PowerManager thermal status: 0 none ... 6 shutdown
     float headroom;                // PowerManager thermal headroom (1.0 = throttling begins)
     int plugged;                   // BatteryManager's EXTRA_PLUGGED: 0 on battery, else the charger's kind
+    uint32_t gpu_mhz;              // the GPU's clock (KGSL's gpuclk / devfreq, where an app may read it); 0 unknown
 } PlatDeviceStats;
 void plat_device_stats(PlatDeviceStats *out);
 // ADPF: the calling thread's work for a frame (busy, ns) and its target (the frame time it must fit)

@@ -4,11 +4,13 @@
 // system driver. volk then takes every Vulkan function from it (device.c: volkLoadInstance / volkLoadDevice).
 #include <adrenotools/driver.h>
 #include <dlfcn.h>
+#include <elf.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "vk.h"
+#include "mbedtls/sha256.h"
 
 // Does this driver offer a Vulkan GPU at all? (Turnip v26.0.0 R8, built for the A7xx: none on an Adreno 830 - the app
 // stopped at "no Vulkan device" on every start, its settings out of reach.) 1.1 and up: below 1.3 device.c checks the
@@ -45,6 +47,49 @@ static bool driver_has_gpu(PFN_vkGetInstanceProcAddr gipa) {
 static char g_rejected[128];
 const char *vk_driver_rejected(void) { return g_rejected; }
 
+// The driver library opened, identified for the driver's evidence (docs/logs/CAMPAINHA-TURNIP.md M1): the SHA-256 of
+// its file and the GNU build id of its ELF; "" for the system's driver
+static char g_drv_sha[65], g_drv_bid[41];
+const char *vk_driver_sha256(void) { return g_drv_sha; }
+const char *vk_driver_build_id(void) { return g_drv_bid; }
+static void driver_identity(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = n > 0 && n < (256l << 20) ? malloc((size_t)n) : NULL;
+    bool ok = buf && fread(buf, 1, (size_t)n, f) == (size_t)n;
+    fclose(f);
+    if (!ok) { free(buf); return; }
+    uint8_t h[32];
+    if (!mbedtls_sha256(buf, (size_t)n, h, 0))
+        for (int i = 0; i < 32; i++) snprintf(g_drv_sha + i * 2, 3, "%02x", h[i]);
+    // (the build id: a PT_NOTE of type NT_GNU_BUILD_ID, name "GNU")
+    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)buf;
+    if ((size_t)n >= sizeof *eh && !memcmp(eh->e_ident, ELFMAG, SELFMAG) && eh->e_ident[EI_CLASS] == ELFCLASS64 &&
+        eh->e_phoff + (uint64_t)eh->e_phnum * sizeof(Elf64_Phdr) <= (uint64_t)n) {
+        const Elf64_Phdr *ph = (const Elf64_Phdr *)(buf + eh->e_phoff);
+        for (int i = 0; i < eh->e_phnum && !g_drv_bid[0]; i++) {
+            if (ph[i].p_type != PT_NOTE || ph[i].p_offset + ph[i].p_filesz > (uint64_t)n) continue;
+            const uint8_t *p = buf + ph[i].p_offset, *end = p + ph[i].p_filesz;
+            while (p + sizeof(Elf64_Nhdr) <= end) {
+                const Elf64_Nhdr *nh = (const Elf64_Nhdr *)p;
+                const uint8_t *name = p + sizeof *nh, *desc = name + ((nh->n_namesz + 3) & ~3u);
+                if (desc + nh->n_descsz > end) break;
+                if (nh->n_type == NT_GNU_BUILD_ID && nh->n_namesz == 4 && !memcmp(name, "GNU", 4)) {
+                    for (uint32_t k = 0; k < nh->n_descsz && k < 20; k++) snprintf(g_drv_bid + k * 2, 3, "%02x", desc[k]);
+                    break;
+                }
+                p = desc + ((nh->n_descsz + 3) & ~3u);
+            }
+        }
+    }
+    free(buf);
+    LOG("[vk] driver file %s: sha256 %s build-id %s (%ld bytes)\n", path, g_drv_sha[0] ? g_drv_sha : "?",
+        g_drv_bid[0] ? g_drv_bid : "?", n);
+}
+
 void vk_android_load(void) {
     void *lib = NULL;
     const char *drv = getenv("LARECOMP_VK_DRIVER"), *hooks = getenv("LARECOMP_NATIVE_LIB_DIR");
@@ -55,9 +100,11 @@ void vk_android_load(void) {
             lib = adrenotools_open_libvulkan(RTLD_NOW | RTLD_LOCAL, ADRENOTOOLS_DRIVER_CUSTOM, NULL, hooks, dir, slash + 1,
                                              NULL, NULL);
         LOG("[vk] driver %s: %s\n", drv, lib ? "loaded through adrenotools" : "FAILED, using the system driver");
+        if (lib) driver_identity(drv);
         PFN_vkGetInstanceProcAddr g = lib ? (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr") : NULL;
         if (lib && (!g || !driver_has_gpu(g))) {
             LOG("[vk] driver %s: no Vulkan 1.1+ GPU it supports here - using the system driver\n", drv);
+            g_drv_sha[0] = g_drv_bid[0] = 0;
             lib = NULL;  // (left loaded: a driver doesn't always unload cleanly)
         }
         if (!lib) {  // (the package's name: its folder, files/drivers/<name>/<library>)
