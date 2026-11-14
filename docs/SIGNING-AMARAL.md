@@ -1,30 +1,5 @@
 # Assinatura fixa BOTWDroid Amaral
 
-## Chave atual (desde 14/11/2026, `0.3.4-beta-amaral.3`, versionCode 41)
-
-A chave de 11/11 não estava disponível. A pedido de Amaral, uma chave nova passou a ser a fixa a partir da Amaral.3.
-Não gere outra chave para atualizações.
-
-- Pacote: `com.botwrecomp.android`
-- Alias: `botwdroid-amaral` (RSA 4096, PKCS12, válida até 2056)
-- **Certificado SHA-256: `56ac29d83a172ea298757d2e565949c6709fe43225235287ab64c064f23b1189`**
-- Assinatura v3 (`apksigner`), com `minSdk` 30.
-- **O backup** (`BOTWDroid-Amaral-chave-2026-11-14.zip`, com o `.p12` e o `keystore.properties`) foi entregue a Amaral.
-  - Não publique nem faça commit do backup nem das senhas.
-  - Para o Gradle, restaure-o fora do repositório: o `.p12` e o `~/.botwrecompandroid/keystore.properties`, com
-    `storeFile` apontando para o `.p12`.
-- O build `release` falha quando a chave está ausente. Não existe fallback para uma chave de debug.
-- Antes de publicar, verifique o APK e compare o SHA-256 do certificado com o registrado acima.
-
-**Migração:**
-- As Amaral.1 e .2 usam o certificado `bef64ef9aab3164036dfb4d42118ae41cbb198cb89a538bc68123bce09448bd8`. A Amaral.3
-  **não instala por cima delas**: é preciso desinstalar antes.
-- A desinstalação apaga os dados do app (saves, configurações, drivers e arquivos do jogo importados). Exporte os
-  saves antes (Configurações > Saves > Exportar) e guarde a pasta do jogo.
-- Da Amaral.3 em diante, as versões mantêm o mesmo pacote, o mesmo certificado e um `versionCode` crescente.
-
-## Chave anterior (11/11/2026, Amaral.1 e .2)
-
 A partir da versão `0.3.4-beta-amaral.1` (`versionCode 39`), usar sempre a chave RSA 4096 criada em 11 de novembro de 2026. Nunca gerar uma chave temporária para uma atualização.
 
 - Pacote: `com.botwrecomp.android`
