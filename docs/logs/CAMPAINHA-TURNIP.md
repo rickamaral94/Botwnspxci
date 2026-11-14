@@ -24,6 +24,8 @@ separa app, GPU e driver.
 
 ## Como acionar
 
+Guia completo do que mandar, por tipo de problema (crash, imagem, desempenho, recurso), com as variáveis do Turnip que existem na versão publicada: [O que os ports devem mandar](https://github.com/rickamaral94/Amaral-Adreno-Tools/blob/ccr-05e1d523-htngw2/docs/PORTS-EVIDENCIA.md), mantido no Amaral Adreno Tools.
+
 Comente no **PR de campainha** deste repositório (`turnip: campainha do agente Turnip (NÃO MESCLAR)`). O agente
 Turnip está inscrito nele e é acordado por cada comentário novo.
 
