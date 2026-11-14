@@ -65,17 +65,19 @@ Levantado em 06/11/2026; detalhes em
 
 - **Driver publicado:** Amaral `mesa-27.0.0-devel-v5.8.17.1` (Latest), Mesa `fd8ef2b`, ELF Standard
   `e64f5306c5c8f52f013f01f3d2627a81704f07ba71ab9518c27be2b209863a96`. Já inclui o `0009` (bind de pipeline).
-- **"Driver compatibility" só em Adreno 8xx.** No Automatic, `turnip_lrz` e `inplace_reads` ligam só em Adreno 8xx
-  (`vk_adreno_8xx` e `vk_turnip_path_on`, `runtime/nvn/vulkan/device.c`). No A740 do Odin, isso significa:
-  - o app exporta `TU_DEBUG=nolrz`;
-  - a leitura do próprio alvo vira cópia a cada barreira (os decalques do terreno no Grande Platô).
+- **Driver compatibility no Automatic.** Conferido no código deste fork em 14/11:
+  - LRZ automático liga em Adreno 8xx **e no 740** (`vk_lrz_auto`, `runtime/nvn/vulkan/device.c`);
+  - `gpu_heap` liga em qualquer Turnip que consiga colocar o heap (`vk_turnip_heap_on`);
+  - `inplace_reads` continua só em 8xx (`vk_turnip_path_on` usa `vk_adreno_8xx`). No A740, a leitura do próprio alvo
+    vira cópia a cada barreira (os decalques do terreno no Grande Platô).
 
-  O heap (`gpu_heap`) já liga em qualquer Turnip que consiga colocá-lo (`vk_turnip_heap_on`).
+  O fork do TOTK passou a ligar também o in-place no 740 desde a amaral.20 (`vk_turnip_path_on` com `vk_lrz_auto`).
+  Na `.19` do TOTK, com as três opções ligadas juntas, os FPS reais foram de 29,2 para 41,4.
 - **Leitura do próprio alvo sem a extensão.** O port não usa `VK_EXT_attachment_feedback_loop_layout`. O Turnip a
   expõe e, com ela, tira o passe de GMEM. Hipótese do agente Turnip: as listras do A750 (issue #129 do upstream) vêm
   de passes em GMEM, e a extensão tornaria `inplace_reads` correto em todo A7xx, sem as cópias.
-- **Testes baratos já propostos, sem build novo, no Odin com a 5.8.17.1, A/B contra o Automatic:**
-  - A1: `turnip_lrz=on`;
+- **Testes baratos, sem build novo, no Odin com a 5.8.17.1, A/B contra o Automatic (o LRZ já fica ligado no
+  740):**
   - A2: `inplace_reads=on`;
   - A3: A2 com `TU_DEBUG=sysmem`.
 
