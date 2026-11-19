@@ -1,5 +1,8 @@
 // User settings (botwrecompandroid.ini next to the executable's working directory), edited from the in-game menu.
 #pragma once
+// the performance overlay's items (Settings.overlay_items, ui/perf_overlay.mm)
+enum { OVERLAY_FPS = 1, OVERLAY_THROTTLE = 2, OVERLAY_GPU = 4, OVERLAY_CPU = 8, OVERLAY_BATTERY = 16, OVERLAY_MEMORY = 32,
+       OVERLAY_ALL = 63 };
 #include <stdbool.h>
 
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
@@ -30,16 +33,21 @@ typedef struct {
                          // screen at the end (0: the screen's own; 1080 / 900 / 720; OUT_AUTO: 1080 on taller
                          // screens, Android's default) - nvn/output_scale.c
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
+    bool shadows;        // the game's shadows drawn (off: their draws skipped - a flatter picture, a little less GPU
+                         // work; vulkan/exec.c)
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
     bool motion;          // the phone's (or a controller's) gyroscope as the controller's motion sensor (hle/motion.c)
     int motion_source;    // whose: 0 automatic (a controller's once its gyroscope is alive), 1 the phone's, 2 a controller's
+    bool lsfg; int lsfg_mult, lsfg_flow;  // frame generation (vulkan/lsfg): on, frames per game frame 2..4, motion resolution % (0: the game's)
     bool motion_flat;     // the phone's sensors as the Switch's screen in handheld mode, not a flat controller (hle/motion.c)
 #ifdef __ANDROID__
     bool touch_controls;  // on-screen controls while no controller is connected (ui/touch_controls.mm)
     int overlay_style;    // Show FPS's overlay (ui/perf_overlay.mm): 0 full, 1 compact (one line)
+    int overlay_scale, overlay_opacity;  // its size and opacity, % (40..150, 20..100)
+    int overlay_items;    // OVERLAY_* bits: what it shows (all by default)
     float overlay_pos[2]; // its top left, a share of the screen, dragged there with a finger (negative: the corner)
     bool event_fps_unlock;  // in-game cutscenes and talks at the chosen frame rate, not 30 (hle/framepace.c)
     bool framegen;          // Video > Frame generation 2x (Lossless.dll's shaders): applies when the game starts (vulkan/framegen.cpp)
@@ -48,13 +56,21 @@ typedef struct {
     bool fg_hud;            // the HUD kept sharp in the generated frames: the real frame's pixels where the HUD is (framegen.c)
     int fg_mult;            // its multiplier: 0 2x (30 -> 60), 1 3x (40 -> 120), 2 4x (30 -> 120)
     bool cbuf_inplace;      // Video > Constant buffers read in place (experimental; only with Sync lag off): vulkan/exec.c
-    bool pipe_warm;         // Video > Pipeline warm-up (experimental): pipelines of the route's list made early (vulkan/exec.c)
     bool gcopy_range;       // Video > Vertex copy reuse (experimental): vulkan/exec.c; on/off in one build for A/B/A
     int fps_mode;         // 0: the game's own choice (30 / 60, the frame pacer), 1: 30 fps, 2: 60 fps, 3: 20 fps, 4: 45 fps
+                          // (what runs: fps_mode_now - 30 while the phone overheats, thermal_cap)
+    bool thermal_cap;     // Android: 60 (or 40 / 45) fps drop to 30 while Android says the phone is too hot (hle/framepace.c)
     bool shader_int32;    // shader address math in 32-bit words even where the driver offers 64-bit (vulkan/exec.c)
     bool native_code;     // Android: the game's own code on the CPU, no build of it (runtime/native.c); off by default
+    int perf_log;         // Android: the start screen's Performance logs - 0 off, 1 the next game, 2 every start: the first
+                          // 60 s of play measured (diag.c), kept across restarts (main.c; from the GTA V port)
+    bool early_z;         // Android: Video > Early depth test - depth / stencil tested before the fragment shader where the
+                          // draw writes neither, discards included (vulkan/exec.c early_z_on; GTA V port; on by default)
+    bool pipe_prewarm;    // Android: recorded graphics pipelines built while a save loads (vulkan/exec.c; experimental, off by default)
     bool files_in_place;  // Android: a setup reads the picked romfs/ where it is, no copy (services/fs.c); off by default
     bool sync_lag;        // Android: the game's next frame overlaps the GPU's last (nvn/objects.c nvnSyncWait); on by default
+    int low_ram;          // RAM saving (vulkan/exec.c vk_low_ram): -1 automatic (devices up to 4 GB), 1 on, 0 off; read once,
+                          // as the app starts
     // Driver compatibility (the start screen's Settings > Prelaunch, ui/launcher.mm; from LASRecompAndroid), for GPUs
     // where a Turnip path draws wrong: read when the game starts (gpu_heap, inplace_reads) or when the app starts
     // (turnip_lrz, log_file). -1 Automatic: on for the Adreno 8xx GPUs these paths were made on, off elsewhere
@@ -88,6 +104,8 @@ typedef struct {
     float touch_drag_sens;
     float stick_deadzone;  // a controller's sticks: a round dead zone (share of the travel, 0-0.4), rescaled past it
                            // (hle/input.c): worn sticks that drift. 0: the game's own only
+    int vibration;         // a controller's rumble from the game's vibration (hle/input.c), % (0: off; 100 by default)
+    bool vibration_phone;  // the phone's own motor where no controller has one (hle/input.c; off by default)
 #endif
     int language;        // LANG_AUTO or an index into g_language_codes: the game's text language
     bool aspect_asked;   // the start screen's one-time "authentic 16:9 or unlocked?" question was answered
@@ -97,6 +115,10 @@ typedef struct {
 
 extern Settings g_settings;
 
+// The frame rate mode in effect (hle/framepace.c): g_settings.fps_mode, or 1 (30 fps) while the thermal cap holds a
+// 60 or 40 / 45 fps mode down. What the pacer, the swap interval and the resolution go by; the menus show the setting.
+int fps_mode_now(void);
+void framepace_thermal_sample(int thermal, float headroom);  // (once a second, from the activity: platform/android.c)
 void settings_load(void);
 void settings_save(void);
 // The menu's RESTORE DEFAULTS: the Video and Audio options back to the defaults (the language, the controls, the touch

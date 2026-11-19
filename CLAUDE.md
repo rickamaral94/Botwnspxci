@@ -7,3 +7,7 @@ Se uma hipótese estiver em aberto, indique qual teste consegue verificá-la. Ao
 Quando uma coleta sugerir gargalo ou regressão do driver, consulte a [seção Turnip](docs/logs/TURNIP.md). Registre a identidade do ELF carregado e o teste que separa o custo do app, da GPU e do driver antes de propor uma mudança no Amaral Adreno Tools.
 
 Para implementar os ajustes pendentes de ports de PC e compilar a próxima candidata, consulte a [passagem da Amaral.2](docs/logs/2026-11-12-handoff-claude-ajustes-pc.md). Ela indica a ordem, os pontos de código, os testes e a verificação do APK.
+## Roteamento de modelos para subagentes
+- Busca, grep, leitura e mapeamento do código: haiku
+- Implementação e testes: sonnet
+- Arquitetura, revisão crítica e decisões difíceis: opus

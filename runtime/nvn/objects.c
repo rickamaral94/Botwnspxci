@@ -1,4 +1,5 @@
 // NVN objects, builders, and state objects (everything except command recording).
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -8,6 +9,7 @@
 #include "../settings.h"
 #include "../framepace.h"
 #include "nvn.h"
+#include "vulkan/watchdog.h"
 
 void renderer_sync(void);
 
@@ -288,6 +290,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     uint64_t t0 = plat_now_ns();
     extern void vk_tl(const char *what, uint64_t a, uint64_t b);  // (vulkan/exec.c: LARECOMP_FRAME_TIMELINE)
     vk_tl("game: SyncWait begin (fence id, submission)", sync_of(A(0))->lseq, sync_of(A(0))->seq);
+    WdMark wd_mark = vk_wd_enter(WD_G_SYNCWAIT, sync_of(A(0))->lseq);  // (freeze watchdog: the waits inside show on top of it)
     kernel_blocking_begin();  // (a long wait: core 0 to the game's other threads, kernel.c)
     if (vk_async_on()) {  // the render thread's translation of the fence first (vulkan/async.c)
         if (flush || whole) vk_async_drain();
@@ -322,16 +325,39 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     // Only once the world has been on screen for a while (LAG_SETTLE frames, the pause menu and map counting): with the
     // lag on from the start, some ponds stayed white for the whole session, and turned on later in play they were right
     // (2026-10-28, POCO F7 Ultra; issue #43 on an Adreno 740) - the water's colour taken once, while loading, from a GPU
-    // result the lag made a frame old. So each load (the save, a fast travel) runs its first seconds without it.
+    // result the lag made a frame old. So each load (the save, a fast travel) ran its first 300 frames without it - and
+    // on a slower GPU those were ~12 s at 17-20 fps after every load (#465, Adreno 825). Re-checked 2026-11-17 on the
+    // POCO with the player's save on the Plateau tower, looking down at the ruins' pond: right with the lag on from
+    // the start too (the write-back fixes since), the same as with 300. Now 30 frames, a second.
+    // Away from the world for 45 frames in a row before that: closing the pause menu, the game is unpaused while
+    // its screen is still up (framepace_on_title for a few frames), and each menu cost the next 300 frames their lag -
+    // ~12 s at ~26 fps instead of 30 after every menu (#374 #439 #433, POCO F7 Ultra 2026-11-15). A load lasts seconds.
     if (lag > 0 && env_lag < 0) {
-        enum { LAG_SETTLE = 300 };
+        static int LAG_SETTLE = -1;  // (LARECOMP_LAG_SETTLE=<frames>: 300 as before)
+        if (LAG_SETTLE < 0) LAG_SETTLE = getenv("LARECOMP_LAG_SETTLE") ? atoi(getenv("LARECOMP_LAG_SETTLE")) : 30;
+        static int lag_away = -1;  // (LARECOMP_LAG_AWAY=<frames>, 0: as before - an A/B)
+        if (lag_away < 0) lag_away = getenv("LARECOMP_LAG_AWAY") ? atoi(getenv("LARECOMP_LAG_AWAY")) : 45;
         extern uint64_t vk_scene_frame(void), renderer_present_count(void);
-        static uint64_t world_since;
+        static uint64_t world_since, away_since;
         uint64_t now = renderer_present_count(), seen = vk_scene_frame();
         bool world = !framepace_on_title() && seen && (now - seen < 20 || framepace_in_menu());
-        if (!world) world_since = 0;
-        else if (!world_since) world_since = now;
-        if (!world_since || now - world_since < LAG_SETTLE) lag = 0;
+        if (!world) {
+            if (!away_since) away_since = now;
+            if (world_since && now - away_since >= (uint64_t)lag_away) {
+                LOG("[synclag] off until the world has been back for %d frames (away since frame %llu: title %d, scene "
+                    "%llu frames ago, menu %d)\n", (int)LAG_SETTLE, (unsigned long long)away_since, framepace_on_title(),
+                    (unsigned long long)(seen ? now - seen : 0), framepace_in_menu());
+                world_since = 0;
+            }
+        } else {
+            away_since = 0;
+            if (!world_since) world_since = now;
+        }
+        if (!world_since || !world || now - world_since < (uint64_t)LAG_SETTLE) lag = 0;
+        static bool was_on;
+        if ((lag > 0) != was_on && (was_on = lag > 0))
+            LOG("[synclag] on at frame %llu (the world back since frame %llu)\n", (unsigned long long)now,
+                (unsigned long long)world_since);
     }
     extern int vk_ab(const char *what);
     int ab = vk_ab("synclag");
@@ -386,6 +412,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     else renderer_wait_seq(sync_of(A(0))->seq);  // only the submission that holds this fence
 #ifdef __ANDROID__
     kernel_blocking_end();
+    vk_wd_leave(wd_mark);
     vk_tl("game: SyncWait end", sync_of(A(0))->lseq, sync_of(A(0))->seq);
     // LARECOMP_LOG_SYNC: waits over a millisecond in the world (frame 1500 on, 40 of them) - how old the fence was,
     // the waits for its translation and its GPU work
@@ -926,7 +953,9 @@ NVN(nvnTextureInitialize) {
     G(uint64_t, A(0), 16) = debug_id;
     RET(1);
 }
+static void slot_retire_pending(void);
 NVN(nvnTextureFinalize) {
+    slot_retire_pending();
     pthread_mutex_lock(&g_live_lock);
     NvnTexture *t = owner_take(A(0));
     pthread_mutex_unlock(&g_live_lock);
@@ -1190,6 +1219,7 @@ NVN(nvnTexturePoolFinalize) {
 #ifdef __ANDROID__
     vk_async_drain();
 #endif
+    slot_retire_pending();
     NvnTexEntry *entries = d->entries;
     for (int i = 0; i < d->count; i++) {
         NvnTexture *t = entries[i].tex;
@@ -1206,47 +1236,123 @@ NVN(nvnTexturePoolSetDebugLabel) { (void)c; }
 NVN(nvnTexturePoolGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
 NVN(nvnTexturePoolGetMemoryOffset) { RET(G(uint64_t, A(0), 16)); }
 NVN(nvnTexturePoolGetSize) { RET(G(uint32_t, A(0), 24)); }
+// A texture pool slot (re)written. On Android the render thread may still have draws queued that read the slot
+// (vulkan/async.c): the write is queued after them and applied by the render thread in order - the draws submitted
+// before it see the old texture, those after the new one, as on the GPU. It used to wait for the render thread to
+// catch up (vk_async_drain) instead: ~30 times a frame in the overworld, ~1.5 s of every 2 s of the game's threads
+// on a Galaxy Tab A9+ (2026-11-13) and ~2,100-2,400 stalls (~1.0-1.2 s of every 2 s) on Mali-G925 - the game's
+// core 0 held meanwhile. With the render thread idle it is written at once. Enabled by default on low-RAM devices
+// and Mali (vk_slot_async_default); LARECOMP_SLOT_DRAIN=1 / 0: the wait, as before / queued.
+typedef struct {
+    NvnDescPool *d;
+    int id;
+    NvnTexture *t;
+    bool has_view, has_sw;
+    NvnTextureView view;
+    uint8_t sw[4];
+    uint64_t lr;
+} SlotReg;
+// The textures a slot write let go: retired by the game's thread (slot_retire_pending), not where the write is applied
+// - on the render thread texture_retire would need g_live_lock, which the game's thread holds while it waits for the
+// render thread (texture_release -> backend_texture_destroyed drains it): the game froze in the inventory, 2026-11-13.
+static pthread_mutex_t slot_m = PTHREAD_MUTEX_INITIALIZER;
+static NvnTexture **slot_old;
+static int slot_nold, slot_cap;
+#ifdef __ANDROID__
+static _Atomic int g_slot_drain = -1;
+#endif
+static void slot_retire_pending(void) {  // (the game's thread)
+    pthread_mutex_lock(&slot_m);
+    int n = slot_nold;
+    NvnTexture **v = n ? malloc((size_t)n * sizeof *v) : NULL;
+    if (n && !v) FATAL("nvn: out of memory retiring replaced texture slots\n");
+    if (v) memcpy(v, slot_old, (size_t)n * sizeof *v);
+    slot_nold = 0;
+    pthread_mutex_unlock(&slot_m);
+    for (int i = 0; i < n; i++) texture_retire(v[i]);
+    free(v);
+}
+RT_ON_RESET(slot_old_reset) {  // (every texture goes with the reset)
+    pthread_mutex_lock(&slot_m);
+    free(slot_old);
+    slot_old = NULL;
+    slot_nold = slot_cap = 0;
+    pthread_mutex_unlock(&slot_m);
+#ifdef __ANDROID__
+    atomic_store_explicit(&g_slot_drain, -1, memory_order_relaxed);
+#endif
+}
+static void slot_apply(void *arg) {
+    SlotReg *r = arg;
+    NvnTexEntry *e = &((NvnTexEntry *)r->d->entries)[r->id];
+    NvnTexture *old = e->tex, *t = r->t;
+    e->tex = t;  // (its reference was taken when it was registered: register_texture)
+    if (old) {
+        pthread_mutex_lock(&slot_m);
+        if (slot_nold == slot_cap) {
+            slot_cap = slot_cap ? slot_cap * 2 : 256;
+            slot_old = realloc(slot_old, (size_t)slot_cap * sizeof *slot_old);
+            if (!slot_old) FATAL("nvn: out of memory for replaced texture slots\n");
+        }
+        slot_old[slot_nold++] = old;
+        pthread_mutex_unlock(&slot_m);
+    }
+    e->has_view = r->has_view;
+    if (e->has_view) e->view = r->view;
+    // the object's own swizzle, where it shares its texture with an object of another (texture_same_storage)
+    if (t && r->has_sw && memcmp(r->sw, t->swizzle, 4) && !(e->has_view && (e->view.setmask & 8))) {
+        if (!e->has_view) memset(&e->view, 0, sizeof e->view);
+        e->has_view = true;
+        e->view.setmask |= 8;
+        memcpy(e->view.swizzle, r->sw, 4);
+    }
+    static int watch_id = -2;  // LARECOMP_WATCH_TEXID=<hex id>: its registrations (texture, view)
+    if (watch_id == -2) watch_id = getenv("LARECOMP_WATCH_TEXID") ? (int)strtol(getenv("LARECOMP_WATCH_TEXID"), NULL, 16) : -1;
+    if (r->id == watch_id || (watch_id == 0x7fffffff && t && t->width == 320 && t->height == 180 && t->levels == 5))  // (7fffffff: the bloom chain)
+        LOG("[watch] texture id %#x <- %p %ux%u levels %u view %d setmask %#x levels %u+%u (lr %llx)\n", r->id, (void *)t,
+            t ? t->width : 0, t ? t->height : 0, t ? t->levels : 0, e->has_view, e->has_view ? e->view.setmask : 0,
+            e->view.base_level, e->view.num_levels, (unsigned long long)r->lr);
+}
 static void register_texture(Cpu *c) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
     if (id < 0 || id >= d->count) return;
     g_tex_stat_reg++;
-    NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
-    NvnTexture *old = e->tex, *t = HOST(NvnTexture, A(2));
+    slot_retire_pending();
+    SlotReg r = {.d = d, .id = id, .t = HOST(NvnTexture, A(2)), .has_view = A(3) != 0, .lr = c->x[30]};
+    if (r.t) {  // (the slot's reference, taken here on the game's thread; the one it replaces is let go in slot_apply)
+        pthread_mutex_lock(&g_live_lock);
+        r.t->refs++;
+        pthread_mutex_unlock(&g_live_lock);
+    }
+    if (r.has_view) memcpy(&r.view, AP(3), sizeof r.view);
+    const uint8_t *sw = r.t ? obj_swizzle(A(2)) : NULL;
+    if (sw) r.has_sw = true, memcpy(r.sw, sw, 4);
 #ifdef __ANDROID__
-    // An asynchronous draw must finish reading the previous descriptor before its slot is replaced.
-    if (old) {
-        extern uint64_t g_tex_drain_ns, g_tex_drains;  // (LARECOMP_LOG_TEXDIAG: the game's threads' wait in these)
+    int dr = atomic_load_explicit(&g_slot_drain, memory_order_relaxed);
+    if (dr < 0) {
+        extern bool vk_slot_async_default(void);
+        const char *e = getenv("LARECOMP_SLOT_DRAIN");
+        dr = e ? (atoi(e) != 0) : !vk_slot_async_default();
+        atomic_store_explicit(&g_slot_drain, dr, memory_order_relaxed);
+    }
+    if (!dr) {
+        SlotReg *q = malloc(sizeof *q);
+        if (!q) FATAL("nvn: out of memory queuing texture slot update\n");
+        *q = r;
+        extern void vk_async_call(void (*fn)(void *), void *arg);
+        vk_async_call(slot_apply, q);  // (q freed after it runs)
+        return;
+    }
+    if (((NvnTexEntry *)d->entries)[id].tex) {
+        extern uint64_t g_tex_drain_ns, g_tex_drains;  // (the game's threads' wait in these)
         uint64_t t0 = plat_now_ns();
         vk_async_drain();
         __atomic_add_fetch(&g_tex_drain_ns, plat_now_ns() - t0, __ATOMIC_RELAXED);
         __atomic_add_fetch(&g_tex_drains, 1, __ATOMIC_RELAXED);
     }
 #endif
-    if (old != t) {
-        pthread_mutex_lock(&g_live_lock);
-        if (t) t->refs++;
-        e->tex = t;
-        pthread_mutex_unlock(&g_live_lock);
-        if (old) texture_retire(old);
-    }
-    e->has_view = A(3) != 0;
-    if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
-    {   // the object's own swizzle, where it shares its texture with an object of another (texture_same_storage)
-        const uint8_t *sw = t ? obj_swizzle(A(2)) : NULL;
-        if (sw && memcmp(sw, t->swizzle, 4) && !(e->has_view && (e->view.setmask & 8))) {
-            if (!e->has_view) memset(&e->view, 0, sizeof e->view);
-            e->has_view = true;
-            e->view.setmask |= 8;
-            memcpy(e->view.swizzle, sw, 4);
-        }
-    }
-    static int watch_id = -2;  // LARECOMP_WATCH_TEXID=<hex id>: its registrations (texture, view)
-    if (watch_id == -2) watch_id = getenv("LARECOMP_WATCH_TEXID") ? (int)strtol(getenv("LARECOMP_WATCH_TEXID"), NULL, 16) : -1;
-    if (id == watch_id || (watch_id == 0x7fffffff && t && t->width == 320 && t->height == 180 && t->levels == 5))  // (7fffffff: the bloom chain)
-        LOG("[watch] texture id %#x <- %p %ux%u levels %u view %d setmask %#x levels %u+%u (lr %llx)\n", id, (void *)t,
-            t ? t->width : 0, t ? t->height : 0, t ? t->levels : 0, e->has_view, e->has_view ? e->view.setmask : 0,
-            e->view.base_level, e->view.num_levels, (unsigned long long)c->x[30]);
+    slot_apply(&r);
 }
 NVN(nvnTexturePoolRegisterTexture) { register_texture(c); }
 NVN(nvnTexturePoolRegisterImage) { register_texture(c); }
@@ -1404,12 +1510,12 @@ NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
 // it stayed. Auto (0): the game's own measurement. Frame rate 20: at least 2.5 vsyncs, its 20 fps mode (interval 3)
 // where the game picks (1.0.0 / 1.6.0; 1.8.2 and 1.9.0 keep the pace by the runtime's clock, hle/framepace.c).
 int64_t rt_frame_ticks(int64_t ticks) {
-    if (!g_settings.fps_mode) return ticks;
-    if (g_settings.fps_mode == 4) {  // (Frame rate 40 / 45: its 25 / 22 ms frames picked the 30 fps mode, interval 2)
+    if (!fps_mode_now()) return ticks;
+    if (fps_mode_now() == 4) {  // (Frame rate 40 / 45: its 25 / 22 ms frames picked the 30 fps mode, interval 2)
         const int64_t cap = 19200000ll * 90 / 100 / 60;  // (0.9 vsyncs: interval 1)
         return ticks > cap ? cap : ticks;
     }
-    if (g_settings.fps_mode == 3) {
+    if (fps_mode_now() == 3) {
         const int64_t floor = 19200000ll * 25 / 10 / 60;  // (2.5 vsyncs)
         return ticks < floor ? floor : ticks;
     }
@@ -1434,7 +1540,7 @@ NVN(nvnWindowSetPresentInterval) {
         uint32_t *max_iv = (uint32_t *)(uintptr_t)(c->x[19] + 0x234), top = twenty ? 3 : 2;
         if (*max_iv > top) *max_iv = top;
         if (force <= 0 && twenty) c->x[1] = 3;
-        else if (force <= 0 && g_settings.fps_mode == 4) c->x[1] = 1;  // (Frame rate 40 / 45: the clock's interval 1 too)
+        else if (force <= 0 && fps_mode_now() == 4) c->x[1] = 1;  // (Frame rate 40 / 45: the clock's interval 1 too)
         else if (force <= 0 && c->x[1] > 2) c->x[1] = 2;  // (out of it: not left at 3)
     }
     if ((int)A(1) != g_present_interval)
@@ -1461,9 +1567,70 @@ NVN(nvnQueueAcquireTexture) {
     w->next = (w->next + 1) % (w->active ? w->active : 1);
     RET(0);
 }
+#ifdef __ANDROID__
+// The app in the background (Home, the recent apps, another app on top: vulkan/device.c gets SDL's background and
+// foreground events): the game stops at its next present until it is back. Before, it kept running unseen, without
+// its pace (nothing presented): 55-60 fps on a POCO F7 Ultra, 232% of a core against 178% in play, the world going on.
+// A save being written goes on first (services/fs.c fs_save_pending: until its Commit), so Android killing the app in
+// the background doesn't cut it in half. The presenting thread gives core 0 back while it waits (kernel.c), as for
+// the renderer. LARECOMP_BG_PAUSE=0: off.
+bool fs_save_pending(void);
+static pthread_mutex_t bg_m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t bg_cv = PTHREAD_COND_INITIALIZER;
+static bool bg_paused;  // (bg_m)
+// (vulkan/watchdog.c: a game stopped in the background is not a freeze; no lock, the waiting thread holds bg_m)
+bool nvn_background_paused(void) { return __atomic_load_n(&bg_paused, __ATOMIC_RELAXED); }
+void nvn_background(bool on) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = !getenv("LARECOMP_BG_PAUSE") || atoi(getenv("LARECOMP_BG_PAUSE"));
+    if (!enabled) return;
+    pthread_mutex_lock(&bg_m);
+    bg_paused = on;
+    pthread_cond_broadcast(&bg_cv);
+    pthread_mutex_unlock(&bg_m);
+}
+static void bg_wait(void) {
+    if (!__atomic_load_n(&bg_paused, __ATOMIC_RELAXED)) return;
+    uint64_t t0 = plat_now_ns();
+    bool waited = false;
+    pthread_mutex_lock(&bg_m);
+    // (a save written meanwhile - the save's own thread, which may need the game's frames to finish it: let them go
+    // on until its Commit, checked every 100 ms)
+    while (bg_paused && !fs_save_pending()) {
+        if (!waited) {
+            waited = true;
+            pthread_mutex_unlock(&bg_m);
+            LOG("[pace] in the background: the game stopped at its present\n");
+            kernel_blocking_begin();
+            pthread_mutex_lock(&bg_m);
+            continue;
+        }
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += 100000000;
+        if (until.tv_nsec >= 1000000000) until.tv_sec++, until.tv_nsec -= 1000000000;
+        pthread_cond_timedwait(&bg_cv, &bg_m, &until);
+    }
+    bool still = bg_paused;
+    pthread_mutex_unlock(&bg_m);
+    if (still) {  // (a save being written)
+        static int logged;
+        if (logged++ < 5) LOG("[pace] in the background, a save being written: the game goes on until it is committed\n");
+    }
+    if (waited) {
+        kernel_blocking_end();
+        LOG("[pace] %s after %.1f s\n", still ? "the game goes on for a save" : "back in the foreground: the game goes on",
+            (plat_now_ns() - t0) / 1e9);
+    }
+}
+#endif
+
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+#ifdef __ANDROID__
+    bg_wait();
+#endif
     {   // (which guest thread presents: LARECOMP_PROF_SVC_TID, kernel.c)
         static uint64_t last_id = ~0ull;
         KThread *kt = kernel_current_thread();
@@ -1481,7 +1648,7 @@ NVN(nvnQueuePresentTexture) {
         if (on < 0) on = !getenv("LARECOMP_PRESENT_WAIT") || atoi(getenv("LARECOMP_PRESENT_WAIT"));
         extern volatile uint64_t g_vsync_count;
         extern __thread uint64_t g_blocked_ns;  // (kernel.c: the pacer counts this as idle, not frame work)
-        int cap = g_settings.fps_mode == 2 || g_settings.fps_mode == 4 ? 1 : g_settings.fps_mode == 3 ? 3 : 2;  // (20: 3; 45: 60's)
+        int cap = fps_mode_now() == 2 || fps_mode_now() == 4 ? 1 : fps_mode_now() == 3 ? 3 : 2;  // (20: 3; 45: 60's)
         int n = w->interval > cap ? w->interval : cap;
         if (on && framepace_on()) {
             // BOTW 1.8.2 (runtime/hle/framepace.c): a steady grid at the chosen frame rate, whatever the interval;

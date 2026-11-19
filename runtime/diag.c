@@ -287,6 +287,9 @@ static int thermal_max = -1;
 static uint64_t g_move_cost_ns;
 // A/B (diag_request_ab): the feature alternates every 10 s in the window, so both sides share the clocks and the heat
 volatile int g_diag_ab = -1;
+// which feature: 0 the early depth tests (vulkan/exec.c early_z_on; Amaral.5), 1 the game's busiest threads in the ADPF
+// session (platform/android.c; LARECOMP_AB=adpf - measured 2026-10-30: no gain)
+int g_diag_ab_what = -1;
 static int g_ab_want;
 static uint64_t f_next_ab;
 static uint64_t ab_cl_sum[2][CL];
@@ -303,6 +306,8 @@ static void report_start(void);
 
 void diag_request_ab(int seconds) {
     if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
+    const char *what = getenv("LARECOMP_AB");
+    g_diag_ab_what = what && !strcmp(what, "adpf") ? 1 : 0;
     g_ab_want = 1;
     diag_request(seconds);
 }
@@ -322,6 +327,9 @@ void diag_request(int seconds) {
     cl_n = cl_samples = 0;
     memset(cl_min, 0, sizeof cl_min), memset(cl_max, 0, sizeof cl_max), memset(cl_sum, 0, sizeof cl_sum);
     temp_min = 1e9f, temp_max = -1e9f, headroom_min = 1e9f, thermal_max = -1;
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+    { extern void vk_passprof_reset(void); vk_passprof_reset(); }  // (vulkan/exec.c: GPU per pass kind)
+#endif
     atomic_fetch_add(&g_session, 1);
     atomic_store(&g_state, 1);
     g_diag_armed = 1;
@@ -517,6 +525,10 @@ static double percentile(const uint64_t *v, int n, double p) {
 }
 
 static FILE *g_out;
+static void out(const char *fmt, ...);
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+static void out_line(const char *s) { out("%s", s); }
+#endif
 static void out(const char *fmt, ...) {
     char line[1024];
     va_list ap;
@@ -751,6 +763,10 @@ static void *report_main(void *arg) {
             vk_diag_details(d, sizeof d);
             out("details: %s", d);
         }
+        {   // (vulkan/exec.c: the heaviest and the lightest 2 s windows, pass kind by pass kind)
+            extern void vk_passprof_report(void (*emit)(const char *line));
+            vk_passprof_report(out_line);
+        }
 #endif
         double gpu = 0;
         for (int i = 0; i < f_n; i++) if (f_flags[i] & 1) gpu += f_gpu[i] / 1e6;
@@ -785,7 +801,8 @@ static void *report_main(void *arg) {
     stat_line("acquire (vkAcquireNextImageKHR), gameplay", f_acquire, f_n, f_flags, 1, 1);
     stat_line("present call (vkQueuePresentKHR), gameplay", f_present, f_n, f_flags, 1, 1);
     if (g_ab_want) {
-        out("-- A/B: the game's busiest threads in the ADPF session (on / off, alternating every 10 s; gameplay frames)");
+        out(g_diag_ab_what == 1 ? "-- A/B: the game's busiest threads in the ADPF session (on / off, alternating every 10 s; gameplay frames)"
+                                : "-- A/B: early depth tests, Video > Early depth test (on / off, alternating every 10 s; gameplay frames)");
         for (int a = 1; a >= 0; a--)
             if (ab_ns[a]) out("real frames a second with it %s: %.2f (%llu in %.1f s)", a ? "ON " : "OFF", ab_real[a] * 1e9 / ab_ns[a],
                               (unsigned long long)ab_real[a], ab_ns[a] / 1e9);

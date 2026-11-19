@@ -225,9 +225,20 @@ static std::string check_copied_files(const std::string &root) {
 extern "C" bool native_wanted(void);  // (Native game code: nothing to build - runtime/native.c)
 
 // "" = ready to play, else what is wrong
+extern "C" void gamelib_absent_reason(const char *game_dir, char *out, size_t cap);  // (gamelib.c; not in gamelib.h:
+                                                                                        //  it is in GAMELIB_ID)
 static std::string check_game_files(const std::string &root) {
     std::string why = check_copied_files(root);
-    if (why.empty() && !native_wanted() && !gamelib_present(root.c_str())) return "The game code needs building";
+    if (why.empty() && !native_wanted() && !gamelib_present(root.c_str())) {
+        static std::string logged;  // (the reason, once per change: #299)
+        char reason[1400];
+        gamelib_absent_reason(root.c_str(), reason, sizeof reason);
+        if (logged != reason) {
+            logged = reason;
+            fprintf(stderr, "[launcher] the game code needs building: %s\n", reason);
+        }
+        return "The game code needs building";
+    }
     return why;
 }
 
@@ -526,6 +537,39 @@ static void android_call(const char *method) {  // a static method of the activi
     env->DeleteLocalRef(act);
 }
 
+// The app closed and opened again, the settings saved first (the menu's options read once as it starts: menu.mm)
+void launcher_restart_app(void) {
+    settings_save();
+    android_call("restartApp");
+}
+
+// Video > Frame generation > Import Lossless.dll: the system's file picker, a copy into the app's files
+// (BOTWRecompAndroidActivity importLsfgDll), then nativeLsfgImported - the result for the menu
+extern "C" void vk_fg_dll_imported(void);  // (vulkan/lsfg/lsfg_present.c)
+static std::string g_lsfg_msg;  // (g_lock)
+void launcher_pick_lsfg_dll(void) { android_call("pickLsfgDll"); }
+std::string launcher_lsfg_import_msg(void) {
+    pthread_mutex_lock(&g_lock);
+    std::string m = g_lsfg_msg;
+    pthread_mutex_unlock(&g_lock);
+    return m;
+}
+extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeLsfgImported(JNIEnv *env, jclass,
+                                                                                                        jint result, jstring detail) {
+    const char *t = env->GetStringUTFChars(detail, NULL);
+    std::string d = t ? t : "";
+    if (t) env->ReleaseStringUTFChars(detail, t);
+    char msg[700];
+    if (result == 0) snprintf(msg, sizeof msg, tr("Lossless.dll imported: %s"), d.c_str());
+    else if (result == 1) msg[0] = 0;
+    else snprintf(msg, sizeof msg, tr("That didn't work: %s"), d.c_str());
+    fprintf(stderr, "[lsfg] import: %s\n", result == 0 ? d.c_str() : result == 1 ? "cancelled" : msg);
+    if (result == 0) vk_fg_dll_imported();
+    pthread_mutex_lock(&g_lock);
+    g_lsfg_msg = msg;
+    pthread_mutex_unlock(&g_lock);
+}
+
 static void android_call_int(const char *method, int v) {  // (one int argument)
     JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
     jobject act = (jobject)SDL_GetAndroidActivity();
@@ -693,7 +737,15 @@ extern "C" JNIEXPORT jint JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidAc
 
 // The picked folder is searched (the activity's import thread, through the file provider: it can take a while) - before,
 // nothing on the screen moved until the copy began (issue #17). nativeImportBegin or nativeImportDone follows.
+// (the folders searched so far: shown in place of the 0% - a big folder picked, Download or the storage's root, kept it
+// at 0% long enough to look stuck, #373)
+static std::atomic<int> g_searched;
+extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportSearched(JNIEnv *, jclass, jint n) {
+    g_searched = n;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportLooking(JNIEnv *, jclass) {
+    g_searched = 0;
     pthread_mutex_lock(&g_lock);
     g_busy = true;
     pthread_mutex_unlock(&g_lock);
@@ -838,7 +890,8 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroi
 // The DLC (Settings > DLC; BOTWRecompAndroidActivity importDlc): its image built as romfs.bin is, at
 // <1.0.0's data root>/dlc/aoc.bin (services/fs.c fs_aoc_image), the movies loose in dlc/romfs (hle/movie.c)
 static std::string g_dlc_msg;  // (g_lock) the last install's result
-extern "C" const char *fs_aoc_image(void);  // (runtime/services/fs.c: the DLC image, NULL when not set up)
+extern "C" const char *fs_aoc_image(void);  // (runtime/services/fs.c: the DLC image, NULL when not set up or damaged)
+extern "C" bool fs_aoc_damaged(char *why, size_t why_size);  // (a DLC file there that can't be used)
 static bool g_dlc_failed, g_dlc_busy;
 static std::atomic<float> g_dlc_frac{-1};
 static std::string dlc_dir(void) {
@@ -1319,6 +1372,177 @@ typedef void *GpuDevice;
 #endif
 static int g_bg_w, g_bg_h;
 
+// ------------------------------------------------------------------ banner (banner/README.md)
+// A picture above the version (lower right), put up or taken down without a new release: banner/banner.json in the
+// repository's main branch, read once per launch on a background thread - the start screen never waits for it, the
+// banner appears when it's ready. Offline, no manifest, switched off, outside its dates or a bad image: nothing shown.
+// The image is kept in <data>/cache/banner/ and downloaded again only when its name changes.
+#define BANNER_URL "https://raw.githubusercontent.com/mamcjr/BOTWRecompAndroid/main/banner/banner.json"
+static pthread_mutex_t g_banner_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::vector<uint8_t> g_banner_px;  // decoded RGBA for the UI thread to upload, kept for a later start screen
+static int g_banner_w, g_banner_h;        // (g_banner_lock until g_banner_ready)
+static std::string g_banner_link;         // https:// page opened on a tap, "" for none
+static std::atomic<bool> g_banner_ready;
+#ifdef __APPLE__
+static id<MTLTexture> g_banner;
+#define BANNER_TEXID ((ImTextureID)(__bridge void *)g_banner)
+#else
+static uint64_t g_banner;
+#define BANNER_TEXID ((ImTextureID)g_banner)
+#endif
+
+// url (https, or file:// for tests) saved to dst, at most max_bytes; false on any failure, dst left as it was
+static bool banner_fetch(const std::string &url, const std::string &dst, int max_bytes) {
+#ifdef __ANDROID__
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();  // (attaches this thread)
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return false;
+    jclass c = env->GetObjectClass(act);
+    jmethodID m = env->GetStaticMethodID(c, "download", "(Ljava/lang/String;Ljava/lang/String;I)Z");  // (the activity)
+    bool ok = false;
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    else if (m) {
+        jstring ju = env->NewStringUTF(url.c_str()), jd = env->NewStringUTF(dst.c_str());
+        ok = env->CallStaticBooleanMethod(c, m, ju, jd, (jint)max_bytes);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+        env->DeleteLocalRef(ju);
+        env->DeleteLocalRef(jd);
+    }
+    env->DeleteLocalRef(c);
+    env->DeleteLocalRef(act);
+    return ok;
+#else
+#ifdef _WIN32
+    const char *sr = getenv("SystemRoot");
+    std::string curl = std::string(sr ? sr : "C:\\Windows") + "\\System32\\curl.exe";
+#else
+    std::string curl = "/usr/bin/curl";
+#endif
+    std::string part = dst + ".part", max = std::to_string(max_bytes);
+    const char *av[] = {curl.c_str(), "-fsSL", "--max-time", "15", "--max-filesize", max.c_str(),
+                        "-A", "BOTWRecompAndroid/" LARECOMP_VERSION, url.c_str(), NULL};
+    PlatProc p = plat_spawn(av, part.c_str(), false);
+    if (!p || plat_proc_wait(p, true) != 0) { remove(part.c_str()); return false; }
+    remove(dst.c_str());
+    return rename(part.c_str(), dst.c_str()) == 0;
+#endif
+}
+
+// A field of the manifest's one flat object: a string's contents, or a bare value (true / false); "" when absent
+static std::string banner_field(const std::string &j, const char *key) {
+    std::string k = std::string("\"") + key + "\"";
+    size_t at = j.find(k);
+    if (at == std::string::npos || (at = j.find(':', at + k.size())) == std::string::npos) return "";
+    if ((at = j.find_first_not_of(" \t\r\n", at + 1)) == std::string::npos) return "";
+    if (j[at] == '"') {
+        size_t e = j.find('"', at + 1);
+        return e == std::string::npos ? "" : j.substr(at + 1, e - at - 1);
+    }
+    return j.substr(at, j.find_first_of(",} \t\r\n", at) - at);
+}
+
+static std::string read_small_file(const std::string &path) {
+    std::string s;
+    if (FILE *f = fopen(path.c_str(), "rb")) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, f)) > 0 && s.size() < (64u << 10)) s.append(buf, n);
+        fclose(f);
+    }
+    return s;
+}
+
+static void *banner_thread(void *) {
+    const char *u = getenv("LARECOMP_BANNER_URL");  // (test) another manifest, e.g. file:///sdcard/.../banner.json
+    std::string url = u && *u ? u : BANNER_URL;
+    std::string dir = std::string(rt_data_root()) + "/cache";
+    mkdir(dir.c_str(), 0755);
+    dir += "/banner";
+    mkdir(dir.c_str(), 0755);
+    std::string manifest = dir + "/banner.json";
+    if (!banner_fetch(url, manifest, 64 << 10)) {
+        fprintf(stderr, "[launcher] banner: no manifest at %s\n", url.c_str());
+        return NULL;
+    }
+    std::string j = read_small_file(manifest);
+    remove(manifest.c_str());
+    std::string image = banner_field(j, "image"), link = banner_field(j, "link");
+    std::string start = banner_field(j, "start"), end = banner_field(j, "end");
+    char today[16] = "";
+    time_t now = time(NULL);
+    struct tm tm;
+#ifdef _WIN32
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    strftime(today, sizeof today, "%Y-%m-%d", &tm);
+    if (banner_field(j, "enabled") != "true" || image.empty() || (!start.empty() && today < start) ||
+        (!end.empty() && today > end)) {
+        fprintf(stderr, "[launcher] banner: off (enabled %s, %s to %s, today %s)\n", banner_field(j, "enabled").c_str(),
+                start.c_str(), end.c_str(), today);
+        return NULL;
+    }
+    // the image: a name beside the manifest, or a full https:// URL; kept under its name (image.name says which)
+    std::string name = image.substr(image.rfind('/') + 1), img_url = image;
+    if (image.find("://") == std::string::npos) img_url = url.substr(0, url.rfind('/') + 1) + image;
+    bool name_ok = !name.empty() && name.size() < 100;
+    for (char ch : name) name_ok &= isalnum((unsigned char)ch) || ch == '.' || ch == '-' || ch == '_';
+    if (!name_ok || (image.find("://") != std::string::npos && image.compare(0, 8, "https://") != 0)) {
+        fprintf(stderr, "[launcher] banner: bad image name %s\n", image.c_str());
+        return NULL;
+    }
+    std::string png = dir + "/image.png", tag = dir + "/image.name";
+    if (read_small_file(tag) != name || !file_exists(png)) {
+        remove(tag.c_str());
+        if (!banner_fetch(img_url, png, 4 << 20)) {
+            fprintf(stderr, "[launcher] banner: can't download %s\n", img_url.c_str());
+            return NULL;
+        }
+        if (FILE *f = fopen(tag.c_str(), "wb")) fputs(name.c_str(), f), fclose(f);
+    }
+    SDL_Surface *src = SDL_LoadPNG(png.c_str());
+    SDL_Surface *rgba = src ? SDL_ConvertSurface(src, SDL_PIXELFORMAT_RGBA32) : NULL;
+    if (src) SDL_DestroySurface(src);
+    if (!rgba || rgba->w < 16 || rgba->h < 16 || rgba->w > 4096 || rgba->h > 4096) {
+        fprintf(stderr, "[launcher] banner: %s isn't a usable PNG\n", name.c_str());
+        if (rgba) SDL_DestroySurface(rgba);
+        remove(png.c_str());
+        remove(tag.c_str());
+        return NULL;
+    }
+    pthread_mutex_lock(&g_banner_lock);
+    g_banner_px.resize((size_t)rgba->w * rgba->h * 4);
+    for (int y = 0; y < rgba->h; y++)
+        memcpy(g_banner_px.data() + (size_t)y * rgba->w * 4, (const uint8_t *)rgba->pixels + (size_t)y * rgba->pitch,
+               (size_t)rgba->w * 4);
+    g_banner_w = rgba->w, g_banner_h = rgba->h;
+    g_banner_link = link.compare(0, 8, "https://") == 0 ? link : "";  // (web pages only)
+    pthread_mutex_unlock(&g_banner_lock);
+    SDL_DestroySurface(rgba);
+    fprintf(stderr, "[launcher] banner: %s %dx%d%s%s\n", name.c_str(), g_banner_w, g_banner_h,
+            g_banner_link.empty() ? "" : ", link ", g_banner_link.c_str());
+    g_banner_ready = true;
+    return NULL;
+}
+
+static void banner_upload(GpuDevice dev) {  // (UI thread, outside a frame) once the thread has the picture
+    if (g_banner || !g_banner_ready) return;
+    pthread_mutex_lock(&g_banner_lock);
+#ifdef __APPLE__
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                  width:g_banner_w height:g_banner_h mipmapped:NO];
+    g_banner = [dev newTextureWithDescriptor:td];
+    [g_banner replaceRegion:MTLRegionMake2D(0, 0, g_banner_w, g_banner_h) mipmapLevel:0
+                  withBytes:g_banner_px.data() bytesPerRow:g_banner_w * 4];
+#else
+    (void)dev;
+    g_banner = vk_imgui_texture_rgba(g_banner_px.data(), g_banner_w, g_banner_h);
+#endif
+    pthread_mutex_unlock(&g_banner_lock);
+    if (!g_banner) g_banner_ready = false;  // (no texture: not tried again)
+}
+
 static void load_background(GpuDevice dev) {
     if (g_bg) return;
     char artwork[1100];
@@ -1604,7 +1828,7 @@ static ImGuiKey launcher_pad_key(Uint8 b) {
 static void launcher_pad_open_all(void) {
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    for (int i = 0; ids && i < n; i++) SDL_OpenGamepad(ids[i]);
+    for (int i = 0; ids && i < n; i++) if (input_pad_usable(ids[i])) SDL_OpenGamepad(ids[i]);
     SDL_free(ids);
 }
 
@@ -1613,6 +1837,7 @@ static bool launcher_pad_event(const SDL_Event &e) {
     ImGuiIO &io = ImGui::GetIO();
     switch (e.type) {
     case SDL_EVENT_GAMEPAD_ADDED:
+        if (!input_pad_usable(e.gdevice.which)) return true;  // (a fingerprint sensor, #477)
         SDL_OpenGamepad(e.gdevice.which);
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         return true;
@@ -1904,12 +2129,22 @@ static void prelaunch_tab(float sc) {
                 if (ImGui::Button(tr("Measure and compare (120 s)"))) diag_request_ab(120);
                 if (st == 3) ImGui::Text(tr("Measurement done: the report is in the log and in %s"), msg);
             }
+            {   // (kept across restarts: main.c asks for the measurement as the game boots)
+                static const char *when[] = {"Off", "Next game", "Every start"};
+                int v = g_settings.perf_log < 0 || g_settings.perf_log > 2 ? 0 : g_settings.perf_log;
+                if (opt_choice("Performance logs", &v, when, 3, 0,
+                               "Measures the first 60 s of play (after 5 s out of the menus) and writes the report to the "
+                               "log, as Measure performance does - in the next game only, or every time the game starts. "
+                               "Kept when the app closes.")) {
+                    g_settings.perf_log = v;
+                    changed = true;
+                }
+            }
             ImGui::TextDisabled("%s", tr("In the next game session, records 60 s of gameplay once you have played 5 s out of "
                                          "the menus: where each frame's time goes (the game's threads, the GPU, the clocks). "
                                          "A line in the corner shows it. Play the same stretch as usual, then send the log. "
-                                         "Measure and compare: 120 s, the change being tested (now: the game's busiest threads in "
-                                         "Android's performance hints) turned on and off every 10 s, so both share the clocks "
-                                         "and the heat."));
+                                         "Measure and compare: 120 s, the change being tested (now: Video > Early depth test) turned on "
+                                         "and off every 10 s, so both share the clocks and the heat."));
         }
         ImGui::PopTextWrapPos();
         if (changed) settings_save();
@@ -2017,6 +2252,8 @@ static void prelaunch_tab(float sc) {
         bool failed = g_dlc_failed, dbusy = g_dlc_busy;
         pthread_mutex_unlock(&g_lock);
         bool have = fs_aoc_image() != NULL;
+        char damaged_why[128];
+        bool damaged = fs_aoc_damaged(damaged_why, sizeof damaged_why);  // (the game then runs without the DLC)
         ImGui::PushTextWrapPos(0);
         ImGui::TextDisabled("%s", tr("The Expansion Pass - The Master Trials and The Champions' Ballad - for game versions "
                                      "1.6.0, 1.8.2 and 1.9.0. Choose the folder with your own DLC's extracted romfs: the "
@@ -2026,6 +2263,11 @@ static void prelaunch_tab(float sc) {
         ImGui::TextDisabled("%s", tr("Or choose the DLC's own NSP or XCI (Install from NSP/XCI): it uses the keys chosen or "
                                      "remembered under Game Files > Import from NSP/XCI."));
         ImGui::Text("%s", tr(have ? "Installed." : "Not installed."));
+        if (damaged) {
+            ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", tr("The DLC's file is damaged or incomplete. The game runs "
+                                                                  "without it: reinstall it with Install DLC, or Remove DLC."));
+            ImGui::TextDisabled("%s", damaged_why);
+        }
         float f = g_dlc_frac;
         if (dbusy && f >= 0) ImGui::Text(tr("Installing the DLC... %d%%"), (int)(f * 100));
         if (dbusy || g_busy) ImGui::BeginDisabled();
@@ -2042,7 +2284,7 @@ static void prelaunch_tab(float sc) {
             pthread_mutex_unlock(&g_lock);
             android_call("pickDlcPackage");  // (then importDlcPackage -> nativeBuildDlcPackage -> nativeDlcDone)
         }
-        if (have) {
+        if (have || damaged) {
             ImGui::SameLine();
             if (ImGui::Button(tr("Remove DLC"))) {
                 remove_tree(dlc_dir());
@@ -2091,6 +2333,12 @@ extern "C" void launcher_run(const char *root) {
         update_checked = true;
         pthread_t t;
         if (pthread_create(&t, NULL, update_thread, NULL) == 0) pthread_detach(t);
+    }
+    static bool banner_asked;  // (also once per launch)
+    if (!banner_asked && !getenv("LARECOMP_NO_BANNER")) {
+        banner_asked = true;
+        pthread_t t;
+        if (pthread_create(&t, NULL, banner_thread, NULL) == 0) pthread_detach(t);
     }
     ui_window_init();
     SDL_Window *win = ui_window();
@@ -2254,6 +2502,7 @@ extern "C" void launcher_run(const char *root) {
             if (status.empty() && !g_switching_to && !failed) { load_background(dev); page = MAIN; }
         }
         was_busy = busy;
+        banner_upload(dev);
 
 #ifdef __APPLE__
         int w, h;
@@ -2288,7 +2537,7 @@ extern "C" void launcher_run(const char *root) {
             // the backend (manual mode, no gamepads of its own) clears HasGamepad every frame, and ImGui then drops the
             // controller presses launcher_pad_event fed in and turns gamepad navigation off: set it again while a
             // controller is connected
-            if (SDL_HasGamepad()) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+            if (input_pad_present()) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
             ImGui::NewFrame();
 
             ImVec2 ds = io.DisplaySize;
@@ -2762,6 +3011,11 @@ extern "C" void launcher_run(const char *root) {
                     fg->AddRectFilled(ba, bb, IM_COL32(255, 255, 255, 25), 12 * sc);
                     if (f > 0) fg->AddRectFilled(ba, ImVec2(ba.x + (bb.x - ba.x) * f, bb.y), IM_COL32(236, 194, 84, 255), 12 * sc);
                     char line[200];
+#ifdef __ANDROID__
+                    if (!test_busy && job == "Looking for the game files..." && g_searched > 0)  // (#373)
+                        snprintf(line, sizeof line, "%s   (%d)", tr(job.c_str()), (int)g_searched);
+                    else
+#endif
                     snprintf(line, sizeof line, "%s   %d%%", tr(test_busy ? "Setting up the game files..." : job.c_str()),
                              (int)(f * 100));
                     ImVec2 ls = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, line);
@@ -2843,6 +3097,29 @@ extern "C" void launcher_run(const char *root) {
                 std::string ver = tag_label(LARECOMP_VERSION, true);
 #endif
                 float vs = fs * 1.4f, y = ImGui::GetWindowPos().y + ds.y - 134 * s;
+                if (g_banner) {  // the banner (banner/README.md) above the version: up to a third of the width, in the
+                                 // right half (clear of the menu), below the top margin, its corner on the version's
+                    float bw = fminf(ds.x / 3, ds.x * 0.5f - 60 * s), bh = bw * g_banner_h / g_banner_w;
+                    float bottom = y - 14 * s, max_h = bottom - (ImGui::GetWindowPos().y + 40 * s);
+                    if (bh > max_h) bh = max_h, bw = bh * g_banner_w / g_banner_h;
+                    if (bw > 120 * s) {
+                        ImVec2 b0(right - bw, bottom - bh), b1(right, bottom);
+                        float r = 12 * s;
+                        for (float d : {7.0f, 4.0f, 2.0f})  // (a soft shadow, as the text's)
+                            dl->AddRectFilled(ImVec2(b0.x + d * s, b0.y + d * s), ImVec2(b1.x + d * s, b1.y + d * s),
+                                              IM_COL32(4, 8, 30, 60), r + d * s);
+                        ImGui::SetCursorScreenPos(b0);
+                        ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);  // (not a stop for the controller's menu moves)
+                        bool click = ImGui::InvisibleButton("banner", ImVec2(bw, bh));
+                        ImGui::PopItemFlag();
+                        bool link = !g_banner_link.empty(), hover = link && ImGui::IsItemHovered();
+                        dl->AddImageRounded(BANNER_TEXID, b0, b1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, r);
+                        dl->AddRect(b0, b1, hover ? IM_COL32(255, 214, 64, 255) : IM_COL32(236, 194, 84, 150), r, 0,
+                                    (hover ? 2.5f : 1.5f) * s);
+                        if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                        if (click && link) SDL_OpenURL(g_banner_link.c_str());
+                    }
+                }
                 ImVec2 vsz = font->CalcTextSizeA(vs, FLT_MAX, 0, ver.c_str());
                 text(ImVec2(right - vsz.x, y), vs, IM_COL32(255, 255, 255, 255), ver.c_str(), false);
                 pthread_mutex_lock(&g_update_lock);
@@ -2917,5 +3194,6 @@ extern "C" void launcher_run(const char *root) {
     ImGui::DestroyContext(ctx);
     ImGui::SetCurrentContext(prev_ctx);
     g_bg = 0;
+    g_banner = 0;  // (its pixels stay: uploaded again by a later start screen)
     g_start_screen = 0;
 }

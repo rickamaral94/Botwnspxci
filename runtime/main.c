@@ -13,6 +13,7 @@
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
+#include "benchmark_perf.h"
 
 const char *g_romfs_dir;
 const char *g_romfs_link;
@@ -147,6 +148,7 @@ void backend_clear_window(void);      // a black frame while the game is down
 void audio_stop(void);                // services/audio.c: its threads read guest memory the renderer's reset may free
 
 static void reboot_idle(void) {  // (main thread, while guest threads stop) keep the window alive
+    if (bench_on()) { extern void benchmark_reboot_poll(void); benchmark_reboot_poll(); }
     SDL_Event e;
     while (SDL_PollEvent(&e))
         if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
@@ -256,6 +258,13 @@ int main(int argc, char **argv) {
             extern void launcher_run(const char *root);
             launcher_run(root);
         }
+#ifdef __ANDROID__
+        if (g_settings.perf_log) {  // (start screen > Performance logs: this game's first 60 s of play measured, diag.c)
+            extern void diag_request(int seconds);
+            diag_request(60);
+            if (g_settings.perf_log == 1) { g_settings.perf_log = 0; settings_save(); }  // (the next game only)
+        }
+#endif
         boot(root);
         int kind = ui_run();  // window and input on the main thread; returns when a reboot is requested
         teardown();

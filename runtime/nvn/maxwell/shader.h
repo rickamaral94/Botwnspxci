@@ -44,17 +44,22 @@ typedef struct {
     bool flip_y;            // lower-left window origin
     bool flip_x;            // mirror the image left to right (mirror mode's scene composite). (In the padding
                             // after flip_y: keys without it hash as before - shader caches stay valid.)
-    bool no_ds_write;       // (Android's copy mode, fragment) the draw writes no depth / stencil: early depth tests are
-                            // exact even with a discard (in the padding too)
+    bool no_ds_write;       // (fragment; Android's copy mode, and every mode with Video > Early depth test) the draw
+                            // writes no depth / stencil: early depth tests are exact even with a discard (in the padding too)
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     bool gmem_linear_lookup;  // Qualcomm compute: cached linear GMap lookup avoids its compiler's binary-search failure
+    uint8_t pad_[6];
+    uint64_t soft_linear;        // bitmask of texture slots i needing software linear filtering (format lacks HW linear filter)
+    uint64_t soft_linear_mip;    // subset of soft_linear using mipmapped min_filter (select LOD when >= 2)
+    uint64_t soft_linear_rep_u;  // subset of soft_linear using REPEAT wrap on U (wrap[0] == 1; else CLAMP_TO_EDGE)
+    uint64_t soft_linear_rep_v;  // subset of soft_linear using REPEAT wrap on V (wrap[1] == 1; else CLAMP_TO_EDGE)
 } ShaderKey;
 
 typedef struct {
     uint32_t handle_offset;  // byte offset of the texture handle in the bound texture cbuf
     uint8_t type;            // TEXTYPE_*
-    bool shadow, is_array, is_image, bindless;
+    bool shadow, is_array, is_image, bindless, sampled;
     uint32_t bindless_cbuf, bindless_offset;
 } ShaderTexture;
 

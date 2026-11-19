@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/system_properties.h>
 #include <sys/syscall.h>
 #include <sys/ucontext.h>
 #include <time.h>
@@ -66,6 +67,37 @@ static void log_file_line(const char *line) {
         g_early[g_early_n++] = '\n';
     }
     pthread_mutex_unlock(&g_logf_lock);
+}
+
+// The phone's own vibration motor (BOTWRecompAndroidActivity.vibrateDevice): amplitude 1-255 for ms, 0 stops it.
+// From the SDL thread (hle/input.c input_rumble_apply).
+void plat_vibrate(int amplitude, int ms) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return;
+    jclass c = (*env)->GetObjectClass(env, act);
+    static jmethodID m;
+    if (!m) m = (*env)->GetStaticMethodID(env, c, "vibrateDevice", "(II)V");
+    if (m) (*env)->CallStaticVoidMethod(env, c, m, (jint)amplitude, (jint)ms);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, c);
+    (*env)->DeleteLocalRef(env, act);
+}
+
+// The fastest refresh rate the screen offers at its current resolution (BOTWRecompAndroidActivity.maxRefreshRate;
+// SDL registers only the current mode): 0 unknown.
+float plat_max_refresh_hz(void) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return 0;
+    float hz = 0;
+    jclass c = (*env)->GetObjectClass(env, act);
+    jmethodID m = (*env)->GetStaticMethodID(env, c, "maxRefreshRate", "()F");
+    if (m) hz = (*env)->CallStaticFloatMethod(env, c, m);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); hz = 0; }
+    (*env)->DeleteLocalRef(env, c);
+    (*env)->DeleteLocalRef(env, act);
+    return hz;
 }
 
 static int picked_folder_log(bool first) {  // BOTWRecompAndroidActivity.openLog: a descriptor, -1 without a usable folder
@@ -188,9 +220,23 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
             return false;
         }
         g_guest_lo = base;
+        const char *app = getenv("LARECOMP_APP");  // (the activity: version, versionCode, phone, Android)
+        if (app && *app) fprintf(stderr, "BOTWRecompAndroid %s\n", app);
         fprintf(stderr, "[android] guest window %#llx-%#llx\n", (unsigned long long)base, (unsigned long long)(base + hi - lo));
         const char *last = getenv("LARECOMP_LAST_EXIT");  // (the activity: ApplicationExitInfo)
         if (last && *last) fprintf(stderr, "[android] the last run ended: %s\n", last);
+        const char *boot = getenv("LARECOMP_BOOT_STATE");
+        if (boot && *boot) fprintf(stderr, "[android] %s\n", boot);
+        const char *boot_props[] = {"ro.boot.bootreason", "sys.boot.reason"};
+        for (unsigned i = 0; i < sizeof boot_props / sizeof *boot_props; i++) {
+            char value[PROP_VALUE_MAX] = "";
+            if (__system_property_get(boot_props[i], value) > 0)
+                fprintf(stderr, "[android] %s: %s\n", boot_props[i], value);
+        }
+        // The crash report from here on, not only once the game's threads run: a custom driver (RADV on an Xclipse,
+        // #234 #345 #383) crashed in the first frames, before the game loaded, and the log just stopped.
+        // (The handler is process-wide; the game's threads install it again for their own signal stacks.)
+        plat_crash_handler_install();
         return true;
     }
     void *p = mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE,
@@ -374,11 +420,15 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
             {   // whose the mallocs are (#249: [anon:scudo:secondary] grew ~2000 every 5 minutes on a Mali)
                 extern int g_cmd_shadow_pages, g_cmd_host_chunks, vk_live_counts(char *out, int cap);
                 struct mallinfo mi = mallinfo();
-                char vk[256] = "";
+                char vk[768] = "";
                 vk_live_counts(vk, sizeof vk);
-                fprintf(stderr, "[android] malloc %zu MB in use (%zu MB mapped by large blocks); command shadow pages %d, host "
-                        "command chunks %d; %s\n", (size_t)mi.uordblks >> 20, (size_t)mi.hblkhd >> 20, g_cmd_shadow_pages,
-                        g_cmd_host_chunks, vk);
+                // (hblkhd: scudo's count can go below zero - frees of blocks mapped before it counted - and printed
+                // unsigned it read 17592186043780 MB, #258: a negative one is left out)
+                long long hb = (long long)mi.hblkhd;
+                char hbs[48] = "";
+                if (hb >= 0) snprintf(hbs, sizeof hbs, " (%lld MB mapped by large blocks)", hb >> 20);
+                fprintf(stderr, "[android] malloc %zu MB in use%s; command shadow pages %d, host command chunks %d; %s\n",
+                        (size_t)mi.uordblks >> 20, hbs, g_cmd_shadow_pages, g_cmd_host_chunks, vk);
             }
         }
     }
@@ -777,6 +827,14 @@ void plat_terminate(void) { _exit(0); }
 static pthread_mutex_t g_ds_lock = PTHREAD_MUTEX_INITIALIZER;
 static PlatDeviceStats g_ds = {.batt_temp_c = -1, .batt_pct = -1, .thermal = -1, .headroom = -1, .plugged = -1};
 
+JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeMemoryPressure(
+        JNIEnv *env, jclass cls, jint level, jlong available, jlong total, jlong threshold, jboolean low, jint pss) {
+    (void)env; (void)cls;
+    LOG("[android] memory pressure level %d: available %llu MB / %llu MB, low threshold %llu MB, low %d, process PSS %d MB\n",
+        level, (unsigned long long)available >> 20, (unsigned long long)total >> 20,
+        (unsigned long long)threshold >> 20, low != 0, pss / 1024);
+}
+
 JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeDeviceStats(JNIEnv *env, jclass cls, jfloat batt_temp_c,
                                                                             jfloat batt_pct, jfloat watts, jint thermal,
                                                                             jfloat headroom, jint plugged) {
@@ -789,6 +847,8 @@ JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nati
     g_ds.headroom = headroom;
     g_ds.plugged = plugged;
     pthread_mutex_unlock(&g_ds_lock);
+    extern void framepace_thermal_sample(int thermal, float headroom);  // (hle/framepace.c: 30 fps while too hot)
+    framepace_thermal_sample(thermal, headroom);
     // LARECOMP_LOG_POWER=1 (a test, on battery only: on the charger the current is the charger's): the power draw each
     // second with the CPU clusters' clocks, this process's CPU share and the A/B side (LARECOMP_AB)
     static int log_power = -1;
@@ -1161,7 +1221,8 @@ static void adpf_work_locked(int slot, uint64_t work_ns, uint64_t target_ns, uin
             if (workers_env < 0) { const char *e = getenv("LARECOMP_ADPF_WORKERS"); workers_env = e && atoi(e) != 0; }
             extern volatile int g_diag_ab;
             extern int kernel_busiest_threads(int32_t *tids, int max, double min_share, int32_t skip);
-            bool want = g_diag_ab >= 0 ? g_diag_ab == 1 : workers_env;
+            extern int g_diag_ab_what;
+            bool want = g_diag_ab >= 0 && g_diag_ab_what == 1 ? g_diag_ab == 1 : workers_env;
             uint64_t now = plat_now_ns();
             if (now >= pick_at || (!want && ncur > 2)) {
                 pick_at = now + 2000000000ull;

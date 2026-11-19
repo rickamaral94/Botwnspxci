@@ -58,6 +58,17 @@ else()
     list(REMOVE_ITEM RT_SRC ${R}/runtime/hle/movie.c)
 endif()
 file(GLOB VK_SRC CONFIGURE_DEPENDS ${R}/runtime/nvn/vulkan/*.c ${R}/runtime/nvn/vulkan/*.cpp)
+# Frame generation (Lossless Scaling's LSFG, runtime/nvn/vulkan/lsfg, GPL-3.0-or-later: an APK built with it is
+# GPL-3.0-or-later as a whole - NOTICE.md). Amaral builds: OFF, a stub in its place - the frame generation is ours,
+# vulkan/framegen.c (lsfg-vk's MIT framegen with the HUD mask); -DBOTW_LSFG=ON brings upstream's back.
+option(BOTW_LSFG "Lossless Scaling frame generation (GPL-3.0-or-later)" OFF)
+if(BOTW_LSFG)
+    file(GLOB LSFG_SRC CONFIGURE_DEPENDS ${R}/runtime/nvn/vulkan/lsfg/*.c)
+    list(APPEND VK_SRC ${LSFG_SRC})
+    add_compile_definitions(BOTW_UPSTREAM_LSFG=1)
+else()
+    list(APPEND VK_SRC ${R}/runtime/nvn/vulkan/nolsfg/lsfg_stub.c)
+endif()
 file(GLOB UI_SRC CONFIGURE_DEPENDS ${R}/runtime/ui/*.mm)
 set(IMGUI ${R}/third_party/imgui)
 set(IMGUI_SRC ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp ${IMGUI}/imgui_widgets.cpp

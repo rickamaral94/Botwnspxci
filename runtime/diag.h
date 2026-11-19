@@ -48,10 +48,12 @@ void diag_real_frame(void);  // (vulkan/device.c) a real frame presented (A/B: r
 
 // Start a measurement of `seconds` of gameplay (it begins once the game is out of its menus for 5 s)
 void diag_request(int seconds);
-// The same, comparing a feature on and off in alternating 10 s blocks (today: the constant buffers read in place,
-// vulkan/exec.c inplace_cbufs); g_diag_ab: -1 no comparison running, else the feature's state for this block
+// The same, comparing a feature on and off in alternating 10 s blocks (g_diag_ab_what: 0 the early depth tests,
+// vulkan/exec.c early_z_on; 1 with LARECOMP_AB=adpf, the ADPF threads); g_diag_ab: -1 no comparison running, else the
+// feature's state for this block
 void diag_request_ab(int seconds);
 extern volatile int g_diag_ab;
+extern int g_diag_ab_what;
 // The measurement's state for the menu: 0 none, 1 waiting for gameplay, 2 recording, 3 done; msg: a line to show
 int diag_status(char *msg, size_t n);
 

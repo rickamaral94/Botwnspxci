@@ -106,6 +106,60 @@ bool diag_in_gameplay(void) {
 
 bool framepace_in_event(void) { return g_game_version >= 182 && in_event(); }  // (hle/benchmark.c)
 
+// ---- thermal cap (Video > "30 fps when the phone overheats", g_settings.thermal_cap; after totk-android's
+// thermal_step, MIT): at 60 fps a phone heats until Android lowers its clocks, and the frame rate then jumps between 60
+// and ~40; held at 30 it runs steady, cooler and on less power. Android's own reading, once a second (platform/android.c
+// from BOTWRecompAndroidActivity.reportDeviceStats): thermal status SEVERE (3) or worse, or the headroom forecast 10 s
+// ahead at 1.0 or more (throttling ahead) -> 30 fps; back after 30 readings in a row below both (status under SEVERE,
+// headroom under 0.9), a gap of over 2 s between readings starting the count again. Only 60 and 40 / 45 fps modes:
+// the others are 30 or less already, or the game's own choice. LARECOMP_THERMAL_CAP=1 / 0 over the setting.
+static volatile int g_thermal_hot;  // (1: capped now)
+static int thermal_cap_on(void) {
+    static int env = -2;
+    if (env == -2) env = getenv("LARECOMP_THERMAL_CAP") ? atoi(getenv("LARECOMP_THERMAL_CAP")) != 0 : -1;
+    return env >= 0 ? env : g_settings.thermal_cap;
+}
+void framepace_thermal_sample(int thermal, float headroom) {
+    static uint64_t last_ns;
+    static int cool;  // readings in a row below both lines
+    uint64_t now = plat_now_ns();
+    bool gap = last_ns && now - last_ns > 2000000000ull;
+    last_ns = now;
+    {   // LARECOMP_THERMAL_TEST=<from>,<to> (a test): the readings between those seconds of the run say SEVERE - the POCO
+        // F7 Ultra held 60 fps at 97 C for 12 minutes with HyperOS's status at 0 throughout
+        static double from = -2, to;
+        static uint64_t t0;
+        if (from == -2) {
+            from = -1;
+            const char *e = getenv("LARECOMP_THERMAL_TEST");
+            if (e && sscanf(e, "%lf,%lf", &from, &to) != 2) from = -1;
+        }
+        if (!t0) t0 = now;
+        double s = (now - t0) / 1e9;
+        if (from >= 0 && s >= from && s < to) thermal = 3;
+    }
+    bool hot = thermal >= 3 || headroom >= 1.0f;
+    bool cold = thermal >= 0 && thermal < 3 && (headroom < 0 || headroom < 0.9f);
+    if (gap) cool = 0;
+    if (hot) {
+        cool = 0;
+        if (!g_thermal_hot) {
+            g_thermal_hot = 1;
+            LOG("[framepace] the phone is too hot (thermal status %d, headroom %.2f): 30 fps until it cools%s\n", thermal,
+                headroom, thermal_cap_on() ? "" : " (cap off in the settings: not applied)");
+        }
+    } else if (cold && g_thermal_hot && ++cool >= 30) {
+        g_thermal_hot = 0, cool = 0;
+        LOG("[framepace] the phone has cooled (thermal status %d, headroom %.2f): the chosen frame rate again\n", thermal, headroom);
+    }
+}
+int fps_mode_now(void) {
+    int m = g_settings.fps_mode;
+    if (g_thermal_hot && (m == 2 || m == 4) && thermal_cap_on()) return 1;
+    return m;
+}
+bool framepace_thermal_capped(void) { return g_thermal_hot && thermal_cap_on() && (g_settings.fps_mode == 2 || g_settings.fps_mode == 4); }
+
 int framepace_target(void) {
     static int forced = -2, movie = -2, menu = -2, event = -2;
     if (forced == -2) forced = env_int("LARECOMP_FPS", -1);
@@ -115,8 +169,8 @@ int framepace_target(void) {
     // (Video > Frame rate: 20, 30, 40 / 45, 60; Auto is 60 here - the clock follows whatever the frames really take.
     // 40 / 45: whichever the screen shows evenly, vulkan/device.c vk_between_fps - the game in its 60 fps way)
     extern int vk_between_fps(void);
-    int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 : g_settings.fps_mode == 3 ? 20
-            : g_settings.fps_mode == 4 ? vk_between_fps() : 60;
+    int fps = forced >= 0 ? forced : fps_mode_now() == 1 ? 30 : fps_mode_now() == 3 ? 20
+            : fps_mode_now() == 4 ? vk_between_fps() : 60;
 #ifdef __ANDROID__
     {   // Video > Frame generation: the game at the multiplier's base (30 or 40), generated frames between (nvn/vulkan/framegen.c)
         extern int fg_base_fps(void);
@@ -216,9 +270,9 @@ void rt_vfr_update(uint64_t vfr) {
         // the frame loop's interval (nvn/objects.c, following this one) and the clock's ratio not matching meanwhile,
         // and Link sank into the ground going from 20 to 30 fps (2026-11-02)
         static int last_mode = -1;
-        if (g_settings.fps_mode != last_mode) {
+        if (fps_mode_now() != last_mode) {
             if (last_mode >= 0) slow = period * 30;
-            last_mode = g_settings.fps_mode;
+            last_mode = fps_mode_now();
         }
         smooth += (s - smooth) * 0.05;
         real += s;
@@ -245,11 +299,48 @@ void rt_vfr_update(uint64_t vfr) {
     uint32_t iv = g_vfr_iv;
     // (Frame rate 40 / 45: the game's 60 fps way, interval 1, whatever the ratio - at 40 (0.75) the rule below kept 2
     // while the frame loop ran at 1 (nvn/objects.c), the mismatch that sank Link at 20 fps)
-    if (g_settings.fps_mode == 4) iv = 1, slow = ratio;
+    extern double vk_frame_work_ms(void);
+    static int no_escape = -1;
+    if (no_escape < 0) no_escape = env_int("LARECOMP_NO_INTERVAL_ESCAPE", 0);
+    double w = no_escape ? -1 : vk_frame_work_ms();
+    // Into 20 fps only when the frames themselves are slow: a hitch's frames (a menu closing, a save, shaders compiling;
+    // over 100 ms, left out of the work) pushed the average over 1.3 while the work still fit 30 fps' 33 ms, and the
+    // game spent the next ~15 s at 20 (#374 #439 #433, POCO F7).
+    static int old_rules = -1;  // (LARECOMP_INTERVAL_OLD=1: 0.4.3's - no hitch check, no tries at 30; a test)
+    if (old_rules < 0) old_rules = env_int("LARECOMP_INTERVAL_OLD", 0);
+    bool hitch_only = !old_rules && w > 0 && w < 30.0;
+    if (fps_mode_now() == 4) iv = 1, slow = ratio;
     else if (iv == 1 && slow > 0.85) iv = 2;
     else if (iv == 2 && slow < 0.7) iv = 1;
-    else if (iv == 2 && slow > 1.3) iv = 3;
+    else if (iv == 2 && slow > 1.3 && !hitch_only) iv = 3;
     else if (iv == 3 && slow < 1.15) iv = 2;
+    {   // Back from a slower interval once the work fits the faster one for 2 s. At interval 3 the game presents every
+        // third refresh, so its ratio stays ~1.5 however light the frames get (at 2 in the 60 fps mode, 1): the rules
+        // above never let it go, and a hitch (a save, a menu, a load) left the game at 20 fps (or 30) for good (#339
+        // #374). Not in the 20 fps mode. LARECOMP_NO_INTERVAL_ESCAPE=1: as before.
+        static int fits;
+        bool can = (iv == 3 && fps_mode_now() != 3 && w > 0 && w < 26.0) ||
+                   (iv == 2 && fps_mode_now() == 2 && w > 0 && w < 13.0);
+        fits = can ? fits + 1 : 0;
+        if (fits > 60) iv--, slow = iv == 1 ? 0.5f : 1.0f, fits = 0;
+    }
+    {   // ... and a try at 30 fps every few seconds at 20: there the GPU has room, its governor lowers the clock until
+        // the frame fills it, and the work measured at 20 (27-40 ms) never fell under the 26 above although at 30 the
+        // same frames fit (#374: ~15 s at 20 after each menu). A try that falls back within 5 s doubles the wait (4 s
+        // up to 32 s); 10 s kept at 30 brings it back to 4.
+        static uint64_t at3_since, tried_at, wait_ns = 4000000000ull;
+        if (iv == 3 && g_vfr_iv != 3) at3_since = now;
+        if (iv == 3 && tried_at && now - tried_at < 5000000000ull && g_vfr_iv == 2) {
+            if (wait_ns < 32000000000ull) wait_ns *= 2;
+            tried_at = 0;
+        }
+        if (iv == 2 && tried_at && now - tried_at > 10000000000ull) wait_ns = 4000000000ull, tried_at = 0;
+        if (iv == 3 && g_vfr_iv == 3 && fps_mode_now() != 3 && !no_escape && !old_rules && at3_since &&
+            now - at3_since > wait_ns && w > 0 && w < 45.0) {
+            LOG("[framepace] 20 fps for %.0f s, work %.1f ms: trying 30 again\n", (now - at3_since) / 1e9, w);
+            iv = 2, slow = 1.0f, tried_at = now, at3_since = 0;
+        }
+    }
     VF(float, vfr, VFR_RATIO) = ratio;
     VF(float, vfr, VFR_NEW_RATIO) = ratio;
     VF(uint32_t, vfr, VFR_INTERVAL) = iv;

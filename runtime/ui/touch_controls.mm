@@ -36,6 +36,8 @@ uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);
 bool menu_input_captured(void);  // ui/menu.mm
 void menu_test_open(void);       // ui/menu.mm: opens the in-game menu
 void menu_request_close(void);   // ui/menu.mm
+bool input_pad_present(void);    // hle/input.c: a controller with axes (not a fingerprint sensor, #477)
+bool input_pad_usable(uint32_t id);
 _Atomic uint64_t g_touch_buttons;  // (runtime/hle/input.c) Switch button bits held on the screen
 _Atomic int32_t g_touch_lx, g_touch_ly;  // left stick, -32767..32767, y up
 _Atomic int32_t g_touch_rx, g_touch_ry;  // right stick
@@ -369,7 +371,8 @@ static bool bow_drawn;  // (icon layout) a finger holds the bow (recompute)
 static bool shown2(int k) {
     if (IC[k].r == 0) return false;
     if (talk_on()) return k == I_A || k == I_SPRINT || k == I_MENU;  // (a talk: A, B, the app's menu - and the stick)
-    if (k >= I_PUSH && k <= I_MRIGHT) return editing || rune_now == 2;
+    if (k >= I_PUSH && k <= I_MRIGHT) return editing || rune_now == 2 ||
+                                             (rune_now == 5 && (k == I_PUSH || k == I_PULL));  // (the camera's zoom, #202)
     if (k == I_CANCEL) return editing || bow_held;
     if (k == I_ARROWS) return editing || bow_drawn;
     if (k == I_ALBUM) return editing || rune_now == 5;
@@ -598,7 +601,7 @@ extern "C" bool touch_controls_visible(void) {
     uint64_t now = SDL_GetTicks();
     if (now - checked_ms > 250) {
         checked_ms = now;
-        bool pad = SDL_HasGamepad();
+        bool pad = input_pad_present();
         if (pad && !hide_auto) release_all();
         hide_auto = pad;
     }
@@ -612,27 +615,45 @@ static SDL_FingerID overlay_finger;
 static bool overlay_dragging;
 static float overlay_dx, overlay_dy;
 
+// A double tap on it (two short touches that barely move, within 350 ms) switches compact / detailed (Swap2-Native's)
+static float overlay_x0, overlay_y0;
+static uint64_t overlay_down_ms, overlay_last_tap_ms;
+
 static bool overlay_drag(const SDL_Event *e, float x, float y) {  // true: the finger is the overlay's
     if (e->type == SDL_EVENT_FINGER_DOWN) {
         const float *r = g_perf_rect;
         if (overlay_dragging || !g_settings.show_fps || r[2] <= 0 || x < r[0] || x > r[0] + r[2] || y < r[1] || y > r[1] + r[3])
             return false;
         overlay_dragging = true, overlay_finger = e->tfinger.fingerID, overlay_dx = r[0] - x, overlay_dy = r[1] - y;
+        overlay_x0 = x, overlay_y0 = y, overlay_down_ms = SDL_GetTicks();
         return true;
     }
     if (!overlay_dragging || e->tfinger.fingerID != overlay_finger) return false;
     float nx = (x + overlay_dx) / disp_w, ny = (y + overlay_dy) / disp_h;  // (perf_overlay.mm keeps it on the screen)
     g_settings.overlay_pos[0] = nx < 0 ? 0 : nx > 1 ? 1 : nx;
     g_settings.overlay_pos[1] = ny < 0 ? 0 : ny > 1 ? 1 : ny;
-    if (e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED) overlay_dragging = false, settings_save();
+    if (e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED) {
+        overlay_dragging = false;
+        uint64_t now = SDL_GetTicks();
+        float moved = fabsf(x - overlay_x0) + fabsf(y - overlay_y0), slop = (disp_w < disp_h ? disp_w : disp_h) * 0.03f;
+        if (e->type == SDL_EVENT_FINGER_UP && moved < slop && now - overlay_down_ms < 300) {  // a tap
+            if (overlay_last_tap_ms && now - overlay_last_tap_ms < 350) {
+                g_settings.overlay_style = g_settings.overlay_style == 1 ? 0 : 1;
+                overlay_last_tap_ms = 0;
+            } else overlay_last_tap_ms = now;
+        } else overlay_last_tap_ms = 0;
+        settings_save();
+    }
     return true;
 }
 
 // SDL events (the UI thread): true when the event was for the on-screen controls.
 extern "C" bool touch_controls_event(const SDL_Event *e) {
     switch (e->type) {
-    case SDL_EVENT_GAMEPAD_ADDED: hide_auto = true; release_all(); return false;
-    case SDL_EVENT_GAMEPAD_REMOVED: hide_auto = SDL_HasGamepad(); return false;
+    case SDL_EVENT_GAMEPAD_ADDED:
+        if (input_pad_usable(e->gdevice.which)) hide_auto = true, release_all();
+        return false;
+    case SDL_EVENT_GAMEPAD_REMOVED: hide_auto = input_pad_present(); return false;
     case SDL_EVENT_KEY_DOWN:
         if (e->key.scancode == SDL_SCANCODE_AC_BACK && !e->key.repeat) {
             if (editing) { edit_end(C_CANCEL); return true; }

@@ -52,6 +52,11 @@ static uint32_t *cache_load(uint64_t h, size_t *nwords) {
 
 static pthread_once_t cache_dirs_once = PTHREAD_ONCE_INIT;
 static void cache_dirs_init(void) { mkdir("cache", 0755); mkdir("cache/spirv", 0755); }
+void vk_shader_cache_ensure_dirs(void) { pthread_once(&cache_dirs_once, cache_dirs_init); }
+uint32_t *vk_spirv_load_cached(uint64_t h, size_t *nwords) {
+    if (getenv("LARECOMP_VK_NO_SPIRV_CACHE") != NULL) return NULL;
+    return cache_load(h, nwords);
+}
 static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
     pthread_once(&cache_dirs_once, cache_dirs_init);
     char path[64], tmp[80];
@@ -83,6 +88,7 @@ static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
     size_t n = *nwords, insert = 0, count = 0;
     uint32_t bound = spv[3];
     uint8_t *done = calloc(bound, 1);  // already decorated (glslang does it for what it traces from precise)
+    if (!done) return spv;
     for (size_t i = 5; i < n;) {
         uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
         if (!wc) break;
@@ -98,6 +104,7 @@ static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
     }
     if (!insert || !count) { free(done); return spv; }
     uint32_t *out = malloc((n + count * 3) * 4);
+    if (!out) { free(done); return spv; }
     memcpy(out, spv, insert * 4);
     size_t o = insert;
     for (size_t i = 5; i < n;) {
@@ -138,7 +145,7 @@ static void strip_names(uint32_t *spv, size_t *nwords) {
     *nwords = o;
 }
 
-uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
+uint32_t *vk_glsl_to_spirv_ex(const char *src, int stage, const char *name, size_t *nwords, uint64_t *out_hash) {
     bool optimized = getenv("LARECOMP_VK_OPT") != NULL;
 #ifdef __ANDROID__
     uint64_t h = vk_shader_source_hash(src, stage, optimized);
@@ -147,6 +154,7 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
 #else
     uint64_t h = src_hash(src, stage);
 #endif
+    if (out_hash) *out_hash = h;
     bool nocache = getenv("LARECOMP_VK_NO_SPIRV_CACHE") != NULL;
     uint32_t *out = nocache ? NULL : cache_load(h, nwords);
     if (!out) spirv_misses++;
@@ -166,12 +174,18 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
                                                                                   : shaderc_optimization_level_zero);
     shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);
     shaderc_compile_options_release(o);
+    if (!r) { LOG("[shader] %s: compiler returned no result\n", name); return NULL; }
     if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
         static int nlog;
         if (nlog++ < 20) LOG("[shader] %s: GLSL compile failed:\n%s\n%s\n", name, shaderc_result_get_error_message(r), src);
     } else {
         size_t n = shaderc_result_get_length(r);
         out = malloc(n);
+        if (!out) {
+            LOG("[shader] %s: cannot allocate %zu SPIR-V bytes\n", name, n);
+            shaderc_result_release(r);
+            return NULL;
+        }
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
         strip_names(out, nwords);
@@ -182,10 +196,18 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
     return out;
 }
 
+uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
+    return vk_glsl_to_spirv_ex(src, stage, name, nwords, NULL);
+}
+
 VkShaderModule vk_module(const uint32_t *spv, size_t nwords) {
     VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nwords * 4, .pCode = spv};
     VkShaderModule m;
+    extern long long vk_mnow(void);
+    extern void vk_mgrow_add(int what, long long since);
+    long long mg0 = vk_mnow();
     VkResult result = vkCreateShaderModule(g_vk.dev, &ci, NULL, &m);
+    vk_mgrow_add(0, mg0);  // (exec.c MG_MODULE)
     if (result != VK_SUCCESS) LOG("[shader] vkCreateShaderModule failed: %d (%zu words)\n", result, nwords);
     return result == VK_SUCCESS ? m : VK_NULL_HANDLE;
 }
@@ -309,11 +331,6 @@ static const char *builtin_src(const char *name, int *stage) {
                "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
                "}\n";
     }
-    // FXAA (Video tab "Anti-aliasing"), one pass in the manner of FXAA 3.11's quality path (Timothy Lottes, NVIDIA):
-    // the luma contrast around the pixel picks it; the edge's direction is the stronger of the row / column second
-    // differences; the edge is walked both ways until its luma leaves the edge's mean, and the pixel is moved across it
-    // by how near it is to the nearer end (or by the 3x3 neighbourhood's sub-pixel blend, whichever is more). a = (1 /
-    // size, size).
     // Frame generation's HUD mask (vulkan/framegen.c, exec.c vk_fg_hud_*). fg_hud_mask: where the final image (t0)
     // differs from its copy taken before the HUD's first draw (t1) - the HUD's pixels - widened by 2 texels each way
     // (the generated frames smear the HUD's edges a little), soft: a faint, see-through pane gets a faint weight. In
@@ -351,6 +368,69 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec2 uv = gl_FragCoord.xy * pc.a.xy;\n"
                "  float m = textureLod(t2, uv, 0.0).r;\n"
                "  o = vec4(mix(textureLod(t0, uv, 0.0).rgb, textureLod(t1, uv, 0.0).rgb, m), 1.0);\n"
+               "}\n";
+    }
+    // FXAA (Video tab "Anti-aliasing"), one pass in the manner of FXAA 3.11's quality path (Timothy Lottes, NVIDIA):
+    // the luma contrast around the pixel picks it; the edge's direction is the stronger of the row / column second
+    // differences; the edge is walked both ways until its luma leaves the edge's mean, and the pixel is moved across it
+    // by how near it is to the nearer end (or by the 3x3 neighbourhood's sub-pixel blend, whichever is more). a = (1 /
+    // size, size).
+    // The default since 2026-11-16 is a lighter one: the colour math mediump (GLSL ES: RelaxedPrecision, fp16 where the
+    // driver does it; texture coordinates highp), FXAA 3.11's default threshold for skipping a pixel (contrast under
+    // 1/16 or under 1/8 of its brightest neighbour; it was the "ultra" 1/32, which sent every faint edge down the slow
+    // path) and its fastest search, preset 12 (5 steps of 1, 1.5, 2, 4, 12 instead of 10). LARECOMP_FXAA_FULL=1: the
+    // previous one below.
+    static int fxaa_full = -1;
+    if (fxaa_full < 0) fxaa_full = getenv("LARECOMP_FXAA_FULL") && atoi(getenv("LARECOMP_FXAA_FULL")) != 0;
+    if (!strcmp(name, "fxaa.frag") && !fxaa_full) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 310 es\n"
+               "precision mediump float;\n"
+               "precision highp int;\n"
+               "layout(set = 0, binding = 0) uniform highp sampler2D t0;\n"
+               "layout(push_constant) uniform P { highp vec4 a; highp vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "float lu(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }\n"
+               "vec3 at(highp vec2 uv) { return textureLod(t0, uv, 0.0).rgb; }\n"
+               "float la(highp vec2 uv) { return lu(at(uv)); }\n"
+               "const float steps[5] = float[](1.0, 1.5, 2.0, 4.0, 12.0);\n"
+               "void main() {\n"
+               "  highp vec2 px = pc.a.xy, uv = gl_FragCoord.xy * px;\n"
+               "  vec3 cM = at(uv);\n"
+               "  float lM = lu(cM), lN = la(uv + vec2(0.0, -px.y)), lS = la(uv + vec2(0.0, px.y));\n"
+               "  float lE = la(uv + vec2(px.x, 0.0)), lW = la(uv + vec2(-px.x, 0.0));\n"
+               "  float mx = max(lM, max(max(lN, lS), max(lE, lW))), mn = min(lM, min(min(lN, lS), min(lE, lW)));\n"
+               "  float range = mx - mn;\n"
+               "  if (range < max(0.0625, mx * 0.125)) { o = vec4(cM, 1.0); return; }\n"
+               "  float lNW = la(uv - px), lSE = la(uv + px);\n"
+               "  float lNE = la(uv + vec2(px.x, -px.y)), lSW = la(uv + vec2(-px.x, px.y));\n"
+               "  float sub = (2.0 * (lN + lS + lE + lW) + lNW + lNE + lSW + lSE) / 12.0;\n"
+               "  float subBlend = smoothstep(0.0, 1.0, clamp(abs(sub - lM) / range, 0.0, 1.0));\n"
+               "  subBlend = subBlend * subBlend * 0.75;\n"
+               "  float hor = 2.0 * abs(lN + lS - 2.0 * lM) + abs(lNE + lSE - 2.0 * lE) + abs(lNW + lSW - 2.0 * lW);\n"
+               "  float ver = 2.0 * abs(lE + lW - 2.0 * lM) + abs(lNE + lNW - 2.0 * lN) + abs(lSE + lSW - 2.0 * lS);\n"
+               "  bool isH = hor >= ver;\n"
+               "  float pL = isH ? lS : lE, nL = isH ? lN : lW;\n"
+               "  float pG = abs(pL - lM), nG = abs(nL - lM);\n"
+               "  highp float stepLen = isH ? px.y : px.x;\n"
+               "  float opp = pL, grad = pG;\n"
+               "  if (pG < nG) { stepLen = -stepLen; opp = nL; grad = nG; }\n"
+               "  highp vec2 uvE = uv + (isH ? vec2(0.0, stepLen * 0.5) : vec2(stepLen * 0.5, 0.0));\n"
+               "  highp vec2 es = isH ? vec2(px.x, 0.0) : vec2(0.0, px.y);\n"
+               "  float edgeL = (lM + opp) * 0.5, thr = grad * 0.25;\n"
+               "  highp vec2 puv = uvE + es, nuv = uvE - es;\n"
+               "  float pD = la(puv) - edgeL, nD = la(nuv) - edgeL;\n"
+               "  bool pEnd = abs(pD) >= thr, nEnd = abs(nD) >= thr;\n"
+               "  for (int i = 1; i < 5 && !(pEnd && nEnd); i++) {\n"
+               "    if (!pEnd) { puv += es * steps[i]; pD = la(puv) - edgeL; pEnd = abs(pD) >= thr; }\n"
+               "    if (!nEnd) { nuv -= es * steps[i]; nD = la(nuv) - edgeL; nEnd = abs(nD) >= thr; }\n"
+               "  }\n"
+               "  highp float pDist = isH ? puv.x - uv.x : puv.y - uv.y, nDist = isH ? uv.x - nuv.x : uv.y - nuv.y;\n"
+               "  highp float shortest = min(pDist, nDist);\n"
+               "  bool sgn = pDist <= nDist ? pD >= 0.0 : nD >= 0.0;\n"
+               "  float edgeBlend = sgn == (lM - edgeL >= 0.0) ? 0.0 : float(0.5 - shortest / (pDist + nDist));\n"
+               "  float f = max(subBlend, edgeBlend);\n"
+               "  o = vec4(at(uv + (isH ? vec2(0.0, stepLen * f) : vec2(stepLen * f, 0.0))), 1.0);\n"
                "}\n";
     }
     if (!strcmp(name, "fxaa.frag")) {
@@ -456,6 +536,84 @@ static const char *builtin_src(const char *name, int *stage) {
     // b.xy = input size (alpha: bilinear, for the 3D scene's composite: exec.c scene_upscale). 12 taps around the
     // source pixel, direction / edge length from luma, Lanczos-2-like weights stretched along the edge, clamped to the
     // nearest 4 (no ringing).
+    // The default since 2026-11-16 is a lighter EASU, after the ideas in atyuwen's "Optimizing FSR" (written anew here
+    // from FSR 1, not from that post's code): the edge analysis runs once, on the luma bilinearly interpolated at the
+    // sample point, instead of at the 4 nearest texels and blended; where the luma has no edge (|dir|^2 < 1/128) the
+    // result is the plain bilinear of the 4 nearest texels and the 12 Lanczos weights are skipped; the colour math is
+    // mediump (RelaxedPrecision: fp16 where the driver does it), coordinates highp. Still 12 texelFetch: a bilinear
+    // sampler on the 3D scene's A2B10G10R10 image misread on Turnip (see sgsr1.frag). The deringing clamp stays.
+    // LARECOMP_EASU_FULL=1: the full one below.
+    static int easu_full = -1;
+    if (easu_full < 0) easu_full = getenv("LARECOMP_EASU_FULL") && atoi(getenv("LARECOMP_EASU_FULL")) != 0;
+    if (!strcmp(name, "easu.frag") && !easu_full) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 310 es\n"
+               "precision mediump float;\n"
+               "precision highp int;\n"
+               "layout(set = 0, binding = 0) uniform highp sampler2D t;\n"
+               "layout(push_constant) uniform P { highp vec4 a; highp vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "vec3 tap(ivec2 p) { return texelFetch(t, clamp(p, ivec2(0), ivec2(pc.b.xy) - 1), 0).rgb; }\n"
+               "float lum(vec3 c) { return c.g + 0.5 * (c.r + c.b); }\n"
+               "void tapf(inout vec3 ac, inout float aw, vec2 off, vec2 dir, vec2 len2, float lob, float clp, vec3 c) {\n"
+               "  vec2 v = vec2(dot(off, dir), dot(off, vec2(-dir.y, dir.x))) * len2;\n"
+               "  float d2 = min(dot(v, v), clp);\n"
+               "  float wb = 0.4 * d2 - 1.0, wa = lob * d2 - 1.0;\n"
+               "  wb *= wb; wa *= wa;\n"
+               "  float w = (1.5625 * wb - 0.5625) * wa;\n"
+               "  ac += c * w; aw += w;\n"
+               "}\n"
+               "void main() {\n"
+               "  highp vec2 hp = floor(gl_FragCoord.xy) * pc.a.xy + pc.a.zw;\n"
+               "  float alpha = texture(t, (hp + 0.5) / pc.b.xy).a;\n"
+               "  highp vec2 fpf = floor(hp);\n"
+               "  vec2 pp = vec2(hp - fpf);\n"
+               "  ivec2 fp = ivec2(fpf);\n"
+               "  //    b c\n"
+               "  //  e f g h\n"
+               "  //  i j k l\n"
+               "  //    n o\n"
+               "  vec3 bC = tap(fp + ivec2(0, -1)), cC = tap(fp + ivec2(1, -1));\n"
+               "  vec3 eC = tap(fp + ivec2(-1, 0)), fC = tap(fp), gC = tap(fp + ivec2(1, 0)), hC = tap(fp + ivec2(2, 0));\n"
+               "  vec3 iC = tap(fp + ivec2(-1, 1)), jC = tap(fp + ivec2(0, 1)), kC = tap(fp + ivec2(1, 1)), lC = tap(fp + ivec2(2, 1));\n"
+               "  vec3 nC = tap(fp + ivec2(0, 2)), oC = tap(fp + ivec2(1, 2));\n"
+               "  float bL = lum(bC), cL = lum(cC), eL = lum(eC), fL = lum(fC), gL = lum(gC), hL = lum(hC);\n"
+               "  float iL = lum(iC), jL = lum(jC), kL = lum(kC), lL = lum(lC), nL = lum(nC), oL = lum(oC);\n"
+               "  vec4 w = vec4((1.0 - pp.x) * (1.0 - pp.y), pp.x * (1.0 - pp.y), (1.0 - pp.x) * pp.y, pp.x * pp.y);\n"
+               // the luma cross around the sample point (up, left, centre, right, down), each bilinear over its 2x2
+               "  float xU = dot(w, vec4(bL, cL, fL, gL)), xL = dot(w, vec4(eL, fL, iL, jL)), xM = dot(w, vec4(fL, gL, jL, kL));\n"
+               "  float xR = dot(w, vec4(gL, hL, kL, lL)), xD = dot(w, vec4(jL, kL, nL, oL));\n"
+               "  float dx = xR - xL, dy = xD - xU;\n"
+               "  vec2 dir = vec2(dx, dy);\n"
+               "  float dr = dot(dir, dir);\n"
+               "  vec3 bil = fC * w.x + gC * w.y + jC * w.z + kC * w.w;\n"
+               "  if (dr < 1.0 / 128.0) { o = vec4(bil, alpha); return; }\n"
+               "  float lx = clamp(abs(dx) / max(max(abs(xR - xM), abs(xM - xL)), 1.0 / 1024.0), 0.0, 1.0);\n"
+               "  float ly = clamp(abs(dy) / max(max(abs(xD - xM), abs(xM - xU)), 1.0 / 1024.0), 0.0, 1.0);\n"
+               "  float len = (lx * lx + ly * ly) * 0.5; len *= len;\n"
+               "  dir *= inversesqrt(dr);\n"
+               "  float stretch = 1.0 / max(abs(dir.x), abs(dir.y));\n"
+               "  vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);\n"
+               "  float lob = 0.5 - 0.29 * len, clp = 1.0 / lob;\n"
+               "  vec3 mn = min(min(fC, gC), min(jC, kC)), mx = max(max(fC, gC), max(jC, kC));\n"
+               "  vec3 ac = vec3(0.0);\n"
+               "  float aw = 0.0;\n"
+               "  tapf(ac, aw, vec2(0.0, -1.0) - pp, dir, len2, lob, clp, bC);\n"
+               "  tapf(ac, aw, vec2(1.0, -1.0) - pp, dir, len2, lob, clp, cC);\n"
+               "  tapf(ac, aw, vec2(-1.0, 1.0) - pp, dir, len2, lob, clp, iC);\n"
+               "  tapf(ac, aw, vec2(0.0, 1.0) - pp, dir, len2, lob, clp, jC);\n"
+               "  tapf(ac, aw, vec2(0.0, 0.0) - pp, dir, len2, lob, clp, fC);\n"
+               "  tapf(ac, aw, vec2(-1.0, 0.0) - pp, dir, len2, lob, clp, eC);\n"
+               "  tapf(ac, aw, vec2(1.0, 1.0) - pp, dir, len2, lob, clp, kC);\n"
+               "  tapf(ac, aw, vec2(2.0, 1.0) - pp, dir, len2, lob, clp, lC);\n"
+               "  tapf(ac, aw, vec2(2.0, 0.0) - pp, dir, len2, lob, clp, hC);\n"
+               "  tapf(ac, aw, vec2(1.0, 0.0) - pp, dir, len2, lob, clp, gC);\n"
+               "  tapf(ac, aw, vec2(1.0, 2.0) - pp, dir, len2, lob, clp, oC);\n"
+               "  tapf(ac, aw, vec2(0.0, 2.0) - pp, dir, len2, lob, clp, nC);\n"
+               // (weights summing to ~0: the bilinear result, as for the flat case)
+               "  o = vec4(aw > 1.0 / 1024.0 ? min(mx, max(mn, ac / aw)) : bil, alpha);\n"
+               "}\n";
+    }
     if (!strcmp(name, "easu.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"

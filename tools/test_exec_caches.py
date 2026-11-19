@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Host tests of three runtime/nvn/vulkan/exec.c helpers from 0.3.4-beta-amaral.2, compiled from the source itself.
+"""Host tests of runtime/nvn/vulkan/exec.c helpers from the Amaral builds, compiled from the source itself.
 
-- compute program cache (cs_slot / cs_grow): grows past the old 256 entries, every address found again, its program
-  the same object;
 - copy mode's learned ranges (gres_learn): 48 by default, a range hit again moves to the newest, the oldest evicted
   becomes a spare window; LARECOMP_GRES_LEGACY=1: the old 16, no recency;
-- shader / pipeline wait (wait_built): sleeps by default, LARECOMP_PIPELINE_WAIT_SPIN=1 spins up to 200 us first;
 - G-buffer alias (view_overlaps_rt, alias_case): what counts as the draw's own target, and the case left out - a target
   at a level / layer other than 0 sampled by a view covering it (Amaral.3, the [alias] counter);
-- pipeline warm-up list (warm_parse, program_key): a list of another game version, build, driver or size is dropped;
-  a program's table key is the same from a draw's keys and from the keys stored in the list.
+
+(Amaral.5: the compute cache, the shader / pipeline wait and the warm-up list gave way to upstream 0.4.7's object
+cache, job queue and prewarm, tested by tools/test_object_cache.c, test_shader_job_queue.c, test_pipeline_prewarm.c.)
 
 The functions are cut out of exec.c between their neighbours' markers and built with a C compiler (cc, ASan / UBSan
 where available) against small stand-ins; nothing of Vulkan runs. Run: python3 tools/test_exec_caches.py
@@ -30,16 +28,10 @@ def cut(start, end):
     return SRC[i:SRC.index(end, i)]
 
 
-compute = cut('static CsEntry *cs_slot(', 'static CsProg *compute_program(')
 ranges = cut('typedef struct { uint64_t lo, hi; bool store, learned; } GcRange;', '#define GA_RES ') + \
     cut('#define GA_NRES ', '} GaRes;') + '} GaRes;\n'
 learn = cut('#define GL_LEGACY_MAX', '// Load-only arena copies')
-wait = cut('static uint64_t stat_build_wait_ns', 'static bool rt_is_persistent(')
 alias = cut('static bool view_overlaps_rt(', 'static bool is_attachment_entry(')
-hashw = cut('static uint64_t hash_words(uint64_t h, const void *p, size_t n) {', 'static uint64_t hmix(uint64_t h, const void *p, size_t n) {')
-pkey = cut('static uint64_t program_key(', 'static int g_prog_n;')
-wheader = cut('typedef struct {\n    char magic[8];', '#define WARM_MAX')
-wparse = cut('static const void *warm_parse(', 'static void warm_add(')
 
 HARNESS = r'''
 #include <pthread.h>
@@ -58,47 +50,8 @@ static uint64_t plat_now_ns(void) {
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
-static void SDL_CPUPauseInstruction(void) {}
 static int failed;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failed = 1; } } while (0)
-
-/* ---- compute program cache */
-typedef struct CsProg { uint64_t code_addr; } CsProg;
-typedef struct { uint64_t addr; CsProg *program; } CsEntry;
-static CsEntry *g_cs_tab;
-static size_t g_cs_n, g_cs_cap;
-@COMPUTE@
-/* compute_program's lookup and insert, without the translation */
-static CsProg *cs_get(uint64_t addr) {
-    if (!g_cs_cap && !cs_grow()) return NULL;
-    CsEntry *entry = cs_slot(g_cs_tab, g_cs_cap, addr);
-    if (entry->addr) return entry->program;
-    if (g_cs_n >= g_cs_cap / 2) {
-        if (!cs_grow()) return NULL;
-        entry = cs_slot(g_cs_tab, g_cs_cap, addr);
-    }
-    CsProg *cp = calloc(1, sizeof *cp);
-    cp->code_addr = addr;
-    *entry = (CsEntry){addr, cp};
-    g_cs_n++;
-    return cp;
-}
-static void test_compute(void) {
-    enum { N = 768 };
-    static CsProg *first[N];
-    for (int i = 0; i < N; i++) {  /* (spread and clustered addresses: 16 B apart, and 1 MB apart) */
-        uint64_t a = i & 1 ? 0x100000000ull + (uint64_t)i * 16 : 0x200000000ull + (uint64_t)i * 0x100000;
-        first[i] = cs_get(a);
-        CHECK(first[i] && first[i]->code_addr == a);
-    }
-    CHECK(g_cs_n == N);
-    CHECK(g_cs_cap >= 2 * N);  /* (grown past the old 256 and kept at most half full) */
-    for (int i = 0; i < N; i++) {
-        uint64_t a = i & 1 ? 0x100000000ull + (uint64_t)i * 16 : 0x200000000ull + (uint64_t)i * 0x100000;
-        CHECK(cs_get(a) == first[i]);  /* (found again: the same program, not built anew) */
-    }
-    CHECK(g_cs_n == N);
-}
 
 /* ---- learned ranges */
 @RANGES@
@@ -133,28 +86,6 @@ static void test_learn(int legacy) {
     CHECK(spare == 1);                 /* (the evicted window may be let go) */
 }
 
-/* ---- waits */
-@WAIT@
-static _Atomic int ready;
-static void *setter(void *arg) {
-    usleep((useconds_t)(uintptr_t)arg);
-    ready = 1;
-    return NULL;
-}
-static void test_wait(int spin) {
-    pthread_t t;
-    ready = 0;
-    pthread_create(&t, NULL, setter, (void *)(uintptr_t)(spin ? 20 : 2000));
-    wait_built(&ready);
-    pthread_join(t, NULL);
-    CHECK(ready);
-    CHECK(stat_build_wait_count == 1);
-    CHECK(build_wait_spin_ns() == (spin ? 200000u : 0u));
-    if (!spin) CHECK(stat_build_wait_spin_count == 0);
-    wait_built(&ready);  /* (already built: no wait counted) */
-    CHECK(stat_build_wait_count == 1);
-}
-
 /* ---- G-buffer alias */
 typedef struct { uint32_t levels, width, height; } NvnTexture;
 typedef struct { uint32_t setmask, base_level, num_levels, min_layer, num_layers; } NvnTextureView;
@@ -183,62 +114,12 @@ static void test_alias(void) {
     CHECK(stat_alias == 1);
 }
 
-/* ---- pipeline warm-up list */
-#define VK_UUID_SIZE 16
-#define WARM_MAX 16384
-@WHEADER@
-@WPARSE@
-#include "maxwell/shader.h"
-@HASHW@
-@PKEY@
-static void test_warm(void) {
-    enum { ES = 48 };
-    static unsigned char buf[sizeof(WarmHeader) + 3 * ES + 7];
-    WarmHeader want;
-    memset(&want, 0, sizeof want);
-    memcpy(want.magic, "BOTWPW1", 8);
-    want.entry_size = ES, want.game_version = 182, want.build = 0x1234, want.vendor = 0x5143, want.device = 0x43050a01;
-    want.driver_version = 7;
-    for (int i = 0; i < VK_UUID_SIZE; i++) want.cache_uuid[i] = (uint8_t)i;
-    WarmHeader h = want;
-    h.count = 3;
-    memcpy(buf, &h, sizeof h);
-    uint32_t n = 99;
-    CHECK(warm_parse(buf, sizeof buf, &want, ES, &n) == buf + sizeof h && n == 3);
-    CHECK(!warm_parse(buf, sizeof(WarmHeader) + 2 * ES, &want, ES, &n) && n == 0);  /* (cut short) */
-    CHECK(!warm_parse(buf, sizeof buf, &want, ES + 8, &n));                          /* (another entry size) */
-    WarmHeader bad[8];
-    for (int i = 0; i < 8; i++) bad[i] = h;
-    bad[0].magic[0] = 'X'; bad[1].game_version = 160; bad[2].build ^= 1; bad[3].vendor ^= 1; bad[4].device ^= 1;
-    bad[5].driver_version ^= 1; bad[6].cache_uuid[5] ^= 1; bad[7].count = WARM_MAX + 1;
-    for (int i = 0; i < 8; i++) {
-        memcpy(buf, &bad[i], sizeof bad[i]);
-        CHECK(!warm_parse(buf, sizeof buf, &want, ES, &n));
-    }
-    /* a draw's keys and the same keys read back from the list: the same table key */
-    ShaderKey vk, fk;
-    memset(&vk, 0, sizeof vk), memset(&fk, 0, sizeof fk);
-    vk.glsl = fk.glsl = 1, vk.flip_y = fk.flip_y = 1, vk.attr_kind[3] = 2, fk.rt_kind[1] = 1, fk.vs_out_mask = 0x2f;
-    unsigned char stored[2 * sizeof(ShaderKey)];
-    memcpy(stored, &vk, sizeof vk), memcpy(stored + sizeof vk, &fk, sizeof fk);
-    ShaderKey vk2, fk2;
-    memcpy(&vk2, stored, sizeof vk2), memcpy(&fk2, stored + sizeof vk2, sizeof fk2);
-    uint64_t code[2] = {0x340001000ull, 0x340002000ull}, other[2] = {0x340001000ull, 0x340003000ull};
-    CHECK(program_key(code, &vk, &fk) == program_key(code, &vk2, &fk2));
-    CHECK(program_key(code, &vk, &fk) != program_key(other, &vk, &fk));
-    fk2.rt_kind[1] = 2;
-    CHECK(program_key(code, &vk, &fk) != program_key(code, &vk, &fk2));
-}
-
 int main(int argc, char **argv) {
     const char *what = argc > 1 ? argv[1] : "";
-    if (!strcmp(what, "compute")) test_compute();
-    else if (!strcmp(what, "learn")) test_learn(getenv("LARECOMP_GRES_LEGACY") != NULL);
-    else if (!strcmp(what, "wait")) test_wait(getenv("LARECOMP_PIPELINE_WAIT_SPIN") != NULL);
+    if (!strcmp(what, "learn")) test_learn(getenv("LARECOMP_GRES_LEGACY") != NULL);
     else if (!strcmp(what, "alias")) test_alias();
-    else if (!strcmp(what, "warm")) test_warm();
     else return 2;
-    printf("%s%s: %s\n", what, getenv("LARECOMP_GRES_LEGACY") || getenv("LARECOMP_PIPELINE_WAIT_SPIN") ? " (opt-in)" : "",
+    printf("%s%s: %s\n", what, getenv("LARECOMP_GRES_LEGACY") ? " (opt-in)" : "",
            failed ? "FAILED" : "ok");
     return failed;
 }
@@ -250,9 +131,7 @@ def main():
     if not cc:
         print('no C compiler')
         return 1
-    src = HARNESS.replace('@COMPUTE@', compute).replace('@RANGES@', ranges).replace('@LEARN@', learn) \
-        .replace('@WAIT@', wait).replace('@ALIAS@', alias).replace('@HASHW@', hashw).replace('@PKEY@', pkey) \
-        .replace('@WHEADER@', wheader).replace('@WPARSE@', wparse)
+    src = HARNESS.replace('@RANGES@', ranges).replace('@LEARN@', learn).replace('@ALIAS@', alias)
     with tempfile.TemporaryDirectory() as d:
         c, exe = pathlib.Path(d, 'exec_caches.c'), pathlib.Path(d, 'exec_caches')
         c.write_text(src)
@@ -264,11 +143,10 @@ def main():
         if r.returncode:
             print(r.stderr)
             return 1
-        runs = [('compute', {}), ('learn', {}), ('learn', {'LARECOMP_GRES_LEGACY': '1'}), ('wait', {}),
-                ('wait', {'LARECOMP_PIPELINE_WAIT_SPIN': '1'}), ('alias', {}), ('warm', {})]
+        runs = [('learn', {}), ('learn', {'LARECOMP_GRES_LEGACY': '1'}), ('alias', {})]
         bad = 0
         for what, env in runs:
-            e = {k: v for k, v in os.environ.items() if k not in ('LARECOMP_GRES_LEGACY', 'LARECOMP_PIPELINE_WAIT_SPIN')}
+            e = {k: v for k, v in os.environ.items() if k != 'LARECOMP_GRES_LEGACY'}
             e.update(env)
             p = subprocess.run([str(exe), what], capture_output=True, text=True, env=e)
             sys.stdout.write(p.stdout + p.stderr)

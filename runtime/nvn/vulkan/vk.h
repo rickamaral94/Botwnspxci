@@ -24,6 +24,7 @@
 #include "../maxwell/shader.h"
 
 void vk_device_fault_report(void);
+#include "watchdog.h"
 #ifdef __ANDROID__
 void vk_android_load(void);  // android_driver.c: the Vulkan driver (adrenotools / system) into volk
 const char *vk_driver_rejected(void);  // (the chosen driver package the system's stood in for; "" none)
@@ -47,6 +48,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, shader_int64;
+    bool lsfg_features, null_descriptors;  // (frame generation, lsfg/: what its shaders need, device.c)
     bool dyn_render;              // VK_KHR_dynamic_rendering in use; without it, classic render passes (rpcompat.c)
     bool sync2;                   // synchronization2 in use; without it, Vulkan 1.0 barriers (device.c sync1_*)
     bool framegen;                // made with the frame generation's features (vulkan/framegen.c): Video > Frame generation
@@ -57,6 +59,7 @@ typedef struct {
                                   // 2's) baked into pipelines (exec.c PipeKey.fx)
     bool eds2;                    // extended dynamic state 2 in use; without it, depth bias and primitive restart are
                                   // pipeline state (exec.c PipeKey.prim_restart)
+    bool dyn_vi;                  // VK_EXT_vertex_input_dynamic_state in use: vertex attributes/bindings set dynamically
 #ifdef __ANDROID__
     bool map_placed;              // VK_EXT_map_memory_placed: the guest heap mapped as GPU memory (exec.c vk_heap_place)
     bool mem_fd;                  // VK_KHR_external_memory_fd: the same through an exported file mapped there (vk_heap_place)
@@ -75,6 +78,7 @@ typedef struct {
     VkImageView sc_views[VK_MAX_SWAP_IMAGES];
 } VkG;
 extern VkG g_vk;
+void vk_shader_build_report(const char *where);
 
 // ---- rendering: dynamic rendering, or classic render passes without it (rpcompat.c)
 // colors / ds_format: the attachments' view formats (VK_FORMAT_UNDEFINED: an unused slot), as the pipelines get them
@@ -116,8 +120,10 @@ typedef struct TexBackend {
     VkImageAspectFlags aspect;
     bool gpu_owned, uploaded, dynamic;
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
-    uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
+    uint32_t wgen, full_wgen;  // page write tracking generations (sampled/periodic and last full-hash check)
     uint8_t skip;   // guest levels left out at the top (half-size textures on low RAM: textures.c create_image)
+    uint64_t discarded;  // (low RAM) guest bytes currently discarded via MADV_DONTNEED (0 if none; textures.c)
+    uint64_t disc_hash;  // (discarded) the full hash of its memory right after: still that one = unchanged
     bool scalable, presented;
     uint8_t rs_group;  // RS_*: which output scale its allocation follows (textures.c)
     uint64_t touched_frame, frame_cleared;
@@ -144,6 +150,7 @@ void vk_present_draw_view(VkCommandBuffer cb, VkImageView src, VkFormat fmt, VkE
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)
 void vk_tex_upload_for_mips(NvnTexture *t);  // (drawn into at a level past 0: the CPU's contents first, if never uploaded)
+bool vk_tex_upload_for_load(NvnTexture *t);  // (write-back target before gpu_owned LOAD_OP_LOAD: CPU contents synced)
 VkFormat vk_format(uint32_t nvn_format);
 bool vk_format_alpha_one(uint32_t nvn_format);
 bool renderer_texture_scalable(NvnTexture *t);
@@ -164,8 +171,13 @@ VkImageView vk_dummy_view(int textype);
 VkImageView vk_bc_shadow_view(NvnTexture *t, const NvnTextureView *v, VkFormat *fmt, uint32_t *w, uint32_t *h);
 void vk_bc_shadows_resolve(NvnTexture *const *targets, const NvnTextureView *views, const uint8_t *has_view, int ntargets);
 #endif
+VkFormat vk_sampled_format(NvnTexture *t, const NvnTextureView *v, bool has_view);
+bool vk_format_filters_linear(VkFormat f);
+bool vk_format_is_int(VkFormat f);
+bool vk_any_format_no_linear(void);
 VkSampler vk_sampler(NvnSamplerDesc *d);
 VkSampler vk_sampler_plain(NvnSamplerDesc *d);  // (the same without depth comparison: for non-shadow lookups)
+VkSampler vk_sampler_nearest(NvnSamplerDesc *d, bool compare);
 VkSampler vk_default_sampler(bool linear);
 void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect);
 // Destruction once every submission that may use the object has completed.
@@ -180,3 +192,7 @@ VkShaderModule vk_builtin_shader(const char *name);  // internal shaders (clear,
 
 // ---- device / window (device.c)
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h);
+#ifdef __ANDROID__
+bool vk_driver_is_mali(void);
+bool vk_slot_async_default(void);
+#endif

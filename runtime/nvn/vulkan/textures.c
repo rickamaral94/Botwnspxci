@@ -1,12 +1,18 @@
 // Vulkan textures: NVN formats, images, change-detected uploads from guest memory, views and samplers
 // (counterpart of the texture half of metal.m and the view helpers of renderer.m).
 #include <SDL3/SDL_timer.h>
+#include <errno.h>
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __ANDROID__
+#include <sys/mman.h>
+#endif
 
+#include "../../benchmark_perf.h"
 #include "vk.h"
 #include "../astc.h"
 #include "../renderer.h"
@@ -30,6 +36,25 @@ static VkFormat depth24_stencil8(void) {
         bool ok = (p.optimalTilingFeatures & want) == want && !(e && !atoi(e));
         f = ok ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT;
         LOG("[vk] depth24 stencil8: %s\n", ok ? "D24_UNORM_S8_UINT" : "D32_SFLOAT_S8_UINT");
+    }
+    return f;
+}
+
+// Maleoon 920 advertises D16 but rejects its image view when the opening scene uses it (#301).
+// Keep D16 on other GPUs when it supports every use of these depth textures; D32 is the
+// depth-only format already used for NVN DEPTH24/DEPTH32 on this backend.
+static VkFormat depth16(void) {
+    static VkFormat f;
+    if (!f) {
+        VkFormatProperties p;
+        vkGetPhysicalDeviceFormatProperties(g_vk.phys, VK_FORMAT_D16_UNORM, &p);
+        VkFormatFeatureFlags want = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                    VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        bool d16_ok = (p.optimalTilingFeatures & want) == want;
+        f = d16_ok && g_vk.props.vendorID != 0x19e5 ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT;
+        if (f != VK_FORMAT_D16_UNORM)
+            LOG("[vk] depth16: D32_SFLOAT instead of D16_UNORM (%s)\n",
+                d16_ok ? "Maleoon driver rejects D16 views" : "D16 features unavailable");
     }
     return f;
 }
@@ -74,7 +99,7 @@ static VkFmt fmt_of(uint32_t f) {
     case 0x2F: return (VkFmt){VK_FORMAT_R32G32B32A32_UINT};
     case 0x30: return (VkFmt){VK_FORMAT_R32G32B32A32_SINT};
     case 0x31: return (VkFmt){VK_FORMAT_S8_UINT};
-    case 0x32: return (VkFmt){VK_FORMAT_D16_UNORM};
+    case 0x32: return (VkFmt){depth16()};
     case 0x33: return (VkFmt){VK_FORMAT_D32_SFLOAT};  // DEPTH24 (as on Metal: no 24-bit depth there)
     case 0x34: return (VkFmt){VK_FORMAT_D32_SFLOAT};
     case 0x35: return (VkFmt){depth24_stencil8()};
@@ -413,8 +438,49 @@ void vk_collect_dead(void) {
     vk_rp_collect(done);
 }
 
+static VkFormat resolve_tex_format(const NvnTexture *t, VkFormat *bc_vf_out, bool *astc_out, bool quiet) {
+    VkFormat vf = fmt_of(t->format).vf;
+    VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+    bool astc_used = false;
+#ifdef __ANDROID__
+    static int no_bc = -1;  // LARECOMP_NO_BC=1 (a test): as a GPU without BC - the CPU decode on an Adreno
+    if (no_bc < 0) no_bc = getenv("LARECOMP_NO_BC") != NULL;
+    if (!format_supports(vf, need) || (no_bc && is_bc(vf))) {
+#else
+    if (!format_supports(vf, need)) {
+#endif
+        bool astc = vf >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && vf <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK;
+        const FormatInfo *fi = t->layout.fmt;
+#ifdef __ANDROID__
+        uint32_t bpp;
+        if (is_bc(vf) && fi && (fi->bpb == 8 || fi->bpb == 16) && fi->bw == 4 && fi->bh == 4 &&
+            format_supports(bc_target(vf, &bpp), need)) {
+            if (!quiet) {
+                static bool told;
+                if (!told) { told = true; LOG("[vk] no BC textures on this GPU: decoded on the CPU at upload\n"); }
+            }
+            bc_vf = vf;
+            vf = bc_target(vf, &bpp);
+        } else
+#endif
+        if (astc && fi && fi->bpb == 16) {  // desktop GPUs: decoded on the CPU into an RGBA8 image of the same colour space
+            astc_used = true;
+            vf = t->format >= 0x87 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+        } else {
+            if (!quiet) {
+                static int nlog;
+                if (nlog++ < 20) LOG("[vk] format %d (nvn %#x) not supported: RGBA8 instead\n", vf, t->format);
+            }
+            vf = VK_FORMAT_R8G8B8A8_UNORM;
+        }
+    }
+    if (bc_vf_out) *bc_vf_out = bc_vf;
+    if (astc_out) *astc_out = astc_used;
+    return vf;
+}
+
 static void create_image(NvnTexture *t, TexBackend *b) {
-    VkFmt mf = fmt_of(t->format);
     b->scalable = b->rs_group != RS_NONE;
     b->sx = g_rs[b->rs_group][0];
     b->sy = g_rs[b->rs_group][1];
@@ -444,39 +510,18 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     }
     uint32_t samples = t->samples > 1 ? t->samples : 1;
     if (samples > 1) levels = 1;
-    VkFormat vf = mf.vf;
-    VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     b->astc_bw = b->astc_bh = 0;
+    VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+    bool astc_used = false;
+    VkFormat vf = resolve_tex_format(t, &bc_vf, &astc_used, false);
 #ifdef __ANDROID__
-    b->bc_vf = VK_FORMAT_UNDEFINED;
-    static int no_bc = -1;  // LARECOMP_NO_BC=1 (a test): as a GPU without BC - the CPU decode on an Adreno
-    if (no_bc < 0) no_bc = getenv("LARECOMP_NO_BC") != NULL;
-    if (!format_supports(vf, need) || (no_bc && is_bc(vf))) {
-#else
-    if (!format_supports(vf, need)) {
+    b->bc_vf = bc_vf;
 #endif
-        bool astc = vf >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && vf <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK;
+    if (astc_used) {
         const FormatInfo *fi = t->layout.fmt;
-#ifdef __ANDROID__
-        uint32_t bpp;
-        if (is_bc(vf) && fi && (fi->bpb == 8 || fi->bpb == 16) && fi->bw == 4 && fi->bh == 4 &&
-            format_supports(bc_target(vf, &bpp), need)) {
-            static bool told;
-            if (!told) { told = true; LOG("[vk] no BC textures on this GPU: decoded on the CPU at upload\n"); }
-            b->bc_vf = vf;
-            vf = bc_target(vf, &bpp);
-        } else
-#endif
-        if (astc && fi && fi->bpb == 16) {  // desktop GPUs: decoded on the CPU into an RGBA8 image of the same colour space
-            b->astc_bw = fi->bw;
-            b->astc_bh = fi->bh;
-            b->astc_srgb = t->format >= 0x87;
-            vf = b->astc_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
-        } else {
-            static int nlog;
-            if (nlog++ < 20) LOG("[vk] format %d (nvn %#x) not supported: RGBA8 instead\n", vf, t->format);
-            vf = VK_FORMAT_R8G8B8A8_UNORM;
-        }
+        b->astc_bw = fi->bw;
+        b->astc_bh = fi->bh;
+        b->astc_srgb = t->format >= 0x87;
     }
     bool depthfmt = renderer_format_is_depth(t->format);
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -521,7 +566,11 @@ static void create_image(NvnTexture *t, TexBackend *b) {
             if (half) LOG("[vk] textures from their second level (half size): low RAM\n");
         }
         b->skip = 0;
-        if (half && !depthfmt && b->rs_group == RS_NONE && !(t->flags & (8 | 0x50)) && type == VK_IMAGE_TYPE_2D &&
+        // Only block-compressed ones (BC / ASTC: colours, materials, most of the memory): an uncompressed one may be data
+        // a shader reads texel by texel - the terrain's heights (R16, 1024x1024x8) at half size left the ground around
+        // Link missing (Galaxy Tab A9+, 2026-11-13).
+        bool compressed = t->layout.fmt && t->layout.fmt->bw > 1;
+        if (half && compressed && !depthfmt && b->rs_group == RS_NONE && !(t->flags & (8 | 0x50)) && type == VK_IMAGE_TYPE_2D &&
             samples == 1 && levels >= 2 && t->layout.levels >= 2 && tw >= 128 && th >= 128) {
             tw >>= 1, th >>= 1, levels--, b->skip = 1;
         }
@@ -532,7 +581,11 @@ static void create_image(NvnTexture *t, TexBackend *b) {
                             .samples = (VkSampleCountFlagBits)samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage,
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    extern long long vk_mnow(void);
+    extern void vk_mgrow_add(int what, long long since);
+    long long mg0 = vk_mnow();
     VkResult r = vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL);
+    vk_mgrow_add(3, mg0);  // (exec.c MG_IMAGE)
     if (r != VK_SUCCESS) {
         LOG("[vk] image creation failed (%d): nvn fmt %#x %ux%ux%u target %u\n", r, t->format, t->width, t->height, t->depth, t->target);
         ci.format = vf = VK_FORMAT_R8G8B8A8_UNORM;
@@ -611,10 +664,15 @@ static uint64_t bc_upload_blocks(VkCommandBuffer cb, TexBackend *b, const uint8_
     bc_target(b->bc_vf, &bpp);
     uint64_t out_size = bpp ? (uint64_t)wb * 4 * hb * 4 * bpp : (uint64_t)wb * hb * 16;
     VkSpan s = vk_transient(out_size, 16);
-    uint64_t decode_start = decode_ns ? SDL_GetTicksNS() : 0;
+    bool measure_decode = bench_on();
+    uint64_t decode_start = (decode_ns || measure_decode) ? SDL_GetTicksNS() : 0;
     if (bpp) bc_decode(b->bc_vf, blocks, wb, hb, bsize, s.ptr, bpp);
     else bc1_to_astc(blocks, s.ptr, (uint64_t)wb * hb);
-    if (decode_ns) *decode_ns = SDL_GetTicksNS() - decode_start;
+    if (decode_start) {
+        uint64_t elapsed = SDL_GetTicksNS() - decode_start;
+        if (decode_ns) *decode_ns = elapsed;
+        if (measure_decode) bench_record(BP_BC_NS, elapsed);
+    }
     uint32_t iw = level_w(b, lv), ih = level_h(b, lv);
     VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = wb * 4, .bufferImageHeight = hb * 4,
                             .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, layer, 1}, .imageOffset = {0, 0, (int32_t)z},
@@ -625,6 +683,14 @@ static uint64_t bc_upload_blocks(VkCommandBuffer cb, TexBackend *b, const uint8_
 }
 #endif
 
+static uint64_t tex_discarded_bytes;
+
+static void undiscard(TexBackend *b) {
+    tex_discarded_bytes = tex_discarded_bytes > b->discarded ? tex_discarded_bytes - b->discarded : 0;
+    b->discarded = 0;
+    b->disc_hash = 0;
+}
+
 static void destroy_image(TexBackend *b) {
 #ifdef __ANDROID__
     bc_shadow_destroy(b);
@@ -633,6 +699,12 @@ static void destroy_image(TexBackend *b) {
     if (b->image || b->mem) defer((Dead){.img = b->image, .mem = b->mem});  // (never the same allocation twice)
     b->image = VK_NULL_HANDLE;
     b->mem = VK_NULL_HANDLE;
+    undiscard(b);
+    b->uploaded = false;
+    b->data_hash = 0;
+    b->sample_hash = 0;
+    b->wgen = 0;
+    b->full_wgen = 0;
 }
 
 // Live game textures: an in-place reboot (vk_textures_reset) destroys them all.
@@ -758,6 +830,57 @@ void vk_textures_reset(void) {
 
 // ================================================================== uploads (same change detection as metal.m)
 static uint64_t full_hash_budget, full_hash_budget_frame;
+
+// Low RAM (exec.c vk_low_ram): the periodic full hash of textures the page write tracking saw unwritten is left out
+// (LARECOMP_TEX_PERIODIC=1 / 0); on a 4 GB tablet the game's memory is mostly in swap, and the safety net read every
+// texture back in.
+static bool tex_periodic(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern bool vk_low_ram(void);
+        const char *e = getenv("LARECOMP_TEX_PERIODIC");
+        on = e ? atoi(e) != 0 : !vk_low_ram();
+        if (!on) LOG("[vk] textures: no periodic full hash of unwritten ones (low RAM)\n");
+    }
+    return on;
+}
+
+// Low RAM (exec.c vk_low_ram; LARECOMP_TEX_DISCARD=1 / 0): a sampled texture's guest bytes go back to the OS once
+// uploaded - the guest copy of every texture otherwise sat in RAM next to its image. On a Galaxy Tab A9+ (3.4 GB)
+// ~190 MB, and ~14.5 fps after 9 minutes instead of ~10 (2026-11-13). Only where the page write tracking watches it,
+// so a CPU write (new contents) is still seen.
+// Given back with MADV_PAGEOUT: the pages go to swap (zram) with their contents kept. MADV_DONTNEED (=2: as before)
+// left zero pages, and the game counts on those bytes: it destroys a texture object and later makes a new one over the
+// same memory without loading it again - the zoomed-in map's tiles (840x840 BC1) came back black after a pan or a
+// zoom, and the minimap with them (#471 #478 #489: "dark map with RAM saving on"). Kernels without MADV_PAGEOUT
+// (before Linux 5.4): MADV_COLD, the same contents kept, reclaimed first under pressure.
+static int tex_discard_mode(void) {  // 0 off, 1 contents kept (pageout / cold), 2 zero pages (DONTNEED)
+    static int on = -1;
+    if (on < 0) {
+        extern bool vk_low_ram(void);
+        const char *e = getenv("LARECOMP_TEX_DISCARD");
+        on = e ? atoi(e) : vk_low_ram() ? 1 : 0;
+        if (on < 0 || on > 2) on = 1;
+        if (on) LOG("[vk] textures: guest bytes given back after upload (low RAM; %s)\n",
+                    on == 2 ? "zero pages, LARECOMP_TEX_DISCARD=2" : "to swap, contents kept");
+    }
+    return on;
+}
+static bool tex_discard(void) { return tex_discard_mode() != 0; }
+static int tex_alias_logs;
+
+// The guest bytes of the textures uploaded from memory, and of those discarded (the memory log)
+uint64_t vk_texture_guest_bytes(uint64_t *discarded) {
+    uint64_t all = 0;
+    for (int i = 0; i < g_nlive; i++) {
+        NvnTexture *t = g_live[i];
+        TexBackend *b = t ? t->backend : NULL;
+        if (!b || !b->uploaded || b->gpu_owned || !t->addr) continue;
+        all += tegra_total_size(&t->layout);
+    }
+    if (discarded) *discarded = tex_discarded_bytes;
+    return all;
+}
 
 // Four independent lanes (one serial multiply chain ran at ~1.5 bytes/cycle; dynamic textures are hashed every
 // frame). Values are only compared within a run.
@@ -895,10 +1018,27 @@ static void texture_trace_record(int kind, uint64_t source, uint64_t upload, uin
     }
     since = now;
 }
-static void upload_texture(NvnTexture *t, TexBackend *b) {
-    if (!t->addr || t->target == 10) return;
+static void tex_emit_image_barrier(VkCommandBuffer cb, const TexBackend *b, VkPipelineStageFlags2 src_stage,
+                                   VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access) {
+    VkImageMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                .srcStageMask = src_stage,
+                                .srcAccessMask = src_access,
+                                .dstStageMask = dst_stage,
+                                .dstAccessMask = dst_access,
+                                .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .image = b->image,
+                                .subresourceRange = {b->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+}
+
+static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) {
+    if (!t->addr || t->target == 10) return false;
     uint64_t frame = vk_frame_counter();
-    if (b->uploaded && b->checked_frame == frame) return;
+    if (!for_rt_load && b->uploaded && b->checked_frame == frame) return false;
     // A texture that never changed since its upload is checked every 8th frame - but a linear one (flag 0x40 / 0x10)
     // every frame: BOTW fills its terrain height tiles (256x256 R16, 64x64, linear) on the CPU and draws them into the
     // terrain's arrays (512x512x8 RGBA8) right away, once. Read up to 7 frames late, an array layer was built from the
@@ -908,9 +1048,9 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // linear textures, and page tracking makes most checks free. LARECOMP_LIN_STAGGER=1: every 8th frame, as before.
     static int lin_every = -1;
     if (lin_every < 0) lin_every = !getenv("LARECOMP_LIN_STAGGER");
-    if (b->uploaded && !b->dynamic && !(lin_every && (t->flags & 0x50)) && ((frame + ((uintptr_t)b >> 6)) & 7)) return;
+    if (!for_rt_load && b->uploaded && !b->dynamic && !(lin_every && (t->flags & 0x50)) && ((frame + ((uintptr_t)b >> 6)) & 7)) return false;
     const FormatInfo *fi = t->layout.fmt;
-    if (!fi || !fi->bpb) return;
+    if (!fi || !fi->bpb) return false;
     VkFmt mf = fmt_of(t->format);
     uint64_t total = tegra_total_size(&t->layout);
     b->checked_frame = frame;
@@ -920,7 +1060,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
     if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
-    bool full = b->dynamic || !b->uploaded || always_full;
+    bool full = for_rt_load || b->dynamic || !b->uploaded || always_full;
     // (safety net: a full hash now and then - one larger than the frame's budget too, as the frame's first: a texture
     // over 4 MB never fit it, and a change its samples missed stayed unseen - TOTKRecompAndroid's 26 MB terrain atlas, 20 s)
     bool periodic = frame - b->full_frame >= 120 && (full_hash_budget >= total || full_hash_budget == (4u << 20));
@@ -932,29 +1072,70 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // ~2.4 MB a frame in the overworld). The periodic full hash stays as a safety net. LARECOMP_VK_TEX_WATCH=0: off.
     static int watch = -1;
     if (watch < 0) { const char *e = getenv("LARECOMP_VK_TEX_WATCH"); watch = !e || atoi(e) != 0; }
+    // Pages the CPU wrote are hashed whole, never only sampled: this check takes the written-since mark, so a change the
+    // sample missed was then never seen until the periodic full hash, which a large texture waits long for (its budget).
+    // In TOTK the font's glyph cache (R8 2048x4096, written a few letters at a time) kept new letters missing.
+    // LARECOMP_TEX_WATCH_FULL=0: sampled, as before.
+    static int watch_full = -1;
+    if (watch_full < 0) { const char *e = getenv("LARECOMP_TEX_WATCH_FULL"); watch_full = !e || atoi(e) != 0; }
+    bool tracked = false;
+    uint32_t prev_wgen = b->wgen, now = 0;
     if (watch && !always_full) {
         extern int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
-        uint32_t now = 0;
         int ch = vk_pages_changed(t->addr, total, b->wgen, &now);
+        if (ch > 0 && watch_full) full = true;
         if (ch >= 0) {
+            tracked = true;
             b->wgen = now;
-            if (!ch && b->uploaded && !restyle) {
-                if (!periodic) { prof_tex_watch_skips++; return; }
+            if (ch && b->discarded) {  // (written after its bytes were given back: the rest of it reads zeros now)
+                static int n;
+                if (n++ < 60)
+                    LOG("[discard] frame %llu: written after discard: %ux%ux%u fmt %#x levels %u layers %u flags %#x target %u at %llx+%llx\n",
+                        (unsigned long long)frame, t->width, t->height, t->depth, t->format, t->layout.levels,
+                        t->layout.layers, t->flags, t->target, (unsigned long long)t->addr, (unsigned long long)total);
+            }
+            if (!ch && b->uploaded && !restyle && (!for_rt_load || prev_wgen == b->full_wgen)) {
+                // (low RAM: no periodic full hash of a texture the CPU hasn't written - it read every texture back
+                // in from swap, ~90 MB each 2 s on a 4 GB tablet; LARECOMP_TEX_PERIODIC=1 / 0)
+                if (for_rt_load) b->full_wgen = now;
+                if (for_rt_load || !periodic || !tex_periodic()) { prof_tex_watch_skips++; return false; }
                 if (b->dynamic) full_hash_budget = full_hash_budget > total ? full_hash_budget - total : 0;  // (the others took theirs above)
             }
         }
     }
-    if (b->uploaded && b->dynamic && !always_full && !restyle && !periodic && texture_unchanged(b, mem, total)) return;
+    if (!for_rt_load && b->uploaded && b->dynamic && !always_full && !restyle && !periodic && texture_unchanged(b, mem, total)) return false;
     if (!full && !restyle) {
         prof_tex_samples++;
         uint64_t sh = fnv_sample(mem, total);
-        if (sh == b->sample_hash) return;
+        if (sh == b->sample_hash) return false;
     }
     prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
     uint64_t h = hash_full(mem, total), last_full = b->full_frame, old_sample = b->sample_hash;
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
-    if (b->uploaded && h == b->data_hash && !restyle) return;
+    if (b->discarded && h == b->disc_hash && !restyle) {
+        if (tracked) b->full_wgen = now;
+        return false;  // (its zero pages, as discarded: nothing new)
+    }
+    if (b->uploaded && h == b->data_hash && !restyle) {
+        if (tracked) b->full_wgen = now;
+        return false;
+    }
+    if (!b->uploaded && tex_discard() && tex_alias_logs < 40) {  // (a new texture over discarded bytes: it reads zeros)
+        for (int i = 0; i < g_nlive; i++) {
+            NvnTexture *e = g_live[i];
+            TexBackend *eb = e ? e->backend : NULL;
+            if (!eb || eb == b || !eb->discarded || !e->addr) continue;
+            uint64_t ee = e->addr + tegra_total_size(&e->layout);
+            if (e->addr >= t->addr + total || ee <= t->addr) continue;
+            tex_alias_logs++;
+            LOG("[discard] frame %llu: %ux%ux%u fmt %#x levels %u at %llx+%llx first uploaded over the discarded %ux%ux%u fmt "
+                "%#x levels %u at %llx+%llx\n", (unsigned long long)frame, t->width, t->height, t->depth, t->format,
+                t->layout.levels, (unsigned long long)t->addr, (unsigned long long)total, e->width, e->height, e->depth,
+                e->format, e->layout.levels, (unsigned long long)e->addr, (unsigned long long)(ee - e->addr));
+            break;
+        }
+    }
     if (b->uploaded && h != b->data_hash && !b->dynamic && !always_full) {
         // LARECOMP_LOG_TEX_MISS=1 (diagnosis): a change the sampled check didn't see, found by the periodic full hash -
         // the texture showed its old contents meanwhile (the stretched-terrain curtains after a tower: gone with
@@ -987,14 +1168,32 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 (unsigned long long)e->addr, (unsigned long long)(ee - e->addr));
         }
     }
+    bench_add(BP_TEX_BYTES, total);
+    bool in_main = for_rt_load && b->uploaded;
     b->data_hash = h;
     b->uploaded = true;
+    if (tracked) b->full_wgen = now;
+    undiscard(b);
 #ifdef __ANDROID__
-    if (b->format != mf.vf && !b->astc_bw && !b->bc_vf) return;  // unsupported format: nothing sensible to copy
+    if (b->format != mf.vf && !b->astc_bw && !b->bc_vf) return false;  // unsupported format: nothing sensible to copy
 #else
-    if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
+    if (b->format != mf.vf && !b->astc_bw) return false;  // unsupported format: nothing sensible to copy
 #endif
-    VkCommandBuffer cb = vk_upload_cmd();
+    uint64_t bench_upload_start = bench_clock();
+    VkCommandBuffer cb;
+    if (in_main) {
+        // Already uploaded once: earlier draws in s->main (or s->upload's prior copy) may reference the old contents.
+        // End any previous open pass, record the replacement in program order on s->main, wait for all prior reads/
+        // writes on b->image (WAR/WAW) before TRANSFER_WRITE, and publish to subsequent attachment/shader/transfer
+        // consumers (RAW/WAW) below.
+        vk_end_pass();
+        cb = vk_cmd();
+        tex_emit_image_barrier(cb, b, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                               VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                               VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
+    } else {
+        cb = vk_upload_cmd();
+    }
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
     uint64_t layer_size = tegra_layer_size(&t->layout);
@@ -1015,9 +1214,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
                 if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, blocks, l.w, l.h, l.wb * 16);
                 VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
-                uint64_t decode_start = texture_trace_on() ? SDL_GetTicksNS() : 0;
+                bool measure_decode = bench_on();
+                uint64_t decode_start = (texture_trace_on() || measure_decode) ? SDL_GetTicksNS() : 0;
                 astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
                 uint64_t decode_ns = decode_start ? SDL_GetTicksNS() - decode_start : 0;
+                if (measure_decode) bench_record(BP_ASTC_NS, decode_ns);
                 VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = l.w, .bufferImageHeight = l.h,
                                         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, il, layer, 1},
                                         .imageExtent = {l.w < level_w(b, il) ? l.w : level_w(b, il), l.h < level_h(b, il) ? l.h : level_h(b, il), 1}};
@@ -1043,9 +1244,10 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             uint32_t row = l.wb * fi->bpb;
             uint64_t sz = (uint64_t)row * l.hb * l.d;
             bool expand = mf.expand_rgb && fi->bpb == 3;
-            uint32_t out_row = expand ? l.wb * 4 : row;
+            bool depth16_expand = t->format == 0x32 && b->format == VK_FORMAT_D32_SFLOAT;
+            uint32_t out_row = expand || depth16_expand ? l.wb * 4 : row;
             VkSpan s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
-            uint8_t *lin = expand ? texture_scratch(sz) : s.ptr;
+            uint8_t *lin = expand || depth16_expand ? texture_scratch(sz) : s.ptr;
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
             if (linear) {
                 for (uint32_t y = 0; y < l.hb; y++) memcpy(lin + (uint64_t)y * row, src + (uint64_t)y * LIN_STRIDE(row), row);
@@ -1080,6 +1282,14 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 uint8_t *o = s.ptr;
                 uint64_t n = (uint64_t)l.wb * l.hb * l.d;
                 for (uint64_t i = 0; i < n; i++) { o[i * 4] = lin[i * 3]; o[i * 4 + 1] = lin[i * 3 + 1]; o[i * 4 + 2] = lin[i * 3 + 2]; o[i * 4 + 3] = 255; }
+            } else if (depth16_expand) {  // NVN's normalized D16 texels -> the fallback D32 image
+                float *out = s.ptr;
+                uint64_t n = (uint64_t)l.wb * l.hb * l.d;
+                for (uint64_t i = 0; i < n; i++) {
+                    uint16_t value;
+                    memcpy(&value, lin + i * 2, sizeof value);
+                    out[i] = (float)value / 65535.0f;
+                }
             }
             uint32_t w = l.w, hh = l.h, d = l.d;
             // the copy stays inside the image's level: a texture allocated at the internal resolution (16:9, render
@@ -1104,7 +1314,47 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             texture_trace_record(TEX_TRACE_NATIVE, sz, (uint64_t)out_row * l.hb * l.d, 0);
         }
     }
+    if (in_main) {
+        VkAccessFlags2 att_access = (b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+            ? (VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
+            : (VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        tex_emit_image_barrier(cb, b, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                               VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                               att_access | VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT |
+                                   VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    }
+    bench_elapsed(BP_TEX_NS, bench_upload_start);
+#ifdef __ANDROID__
+    // (low RAM: tex_discard) its guest bytes back to the OS: the whole pages inside it, once its
+    // contents are in the image (the copies above took them). Not dynamic, linear, drawn-into or restyled ones.
+    if (tex_discard() && tracked && !b->dynamic && !linear && b->rs_group == RS_NONE && !b->gpu_owned && !b->scalable &&
+        b->tp <= 0 && total >= (64u << 10)) {
+        uint64_t lo = (t->addr + 0xFFF) & ~0xFFFull, hi = (t->addr + total) & ~0xFFFull;
+        bool zero = tex_discard_mode() == 2;
+        static int pageout = 1;  // (MADV_PAGEOUT refused once - EINVAL, an older kernel: MADV_COLD from then on)
+        int adv = zero ? MADV_DONTNEED : pageout ? MADV_PAGEOUT : MADV_COLD;
+        int r = hi > lo ? madvise((void *)(uintptr_t)lo, hi - lo, adv) : -1;
+        if (r && !zero && pageout && errno == EINVAL) {
+            pageout = 0;
+            LOG("[vk] textures: MADV_PAGEOUT not supported, MADV_COLD instead\n");
+            r = madvise((void *)(uintptr_t)lo, hi - lo, MADV_COLD);
+        }
+        if (!r) {
+            undiscard(b);
+            b->discarded = hi - lo;
+            tex_discarded_bytes += b->discarded;
+            if (zero) {
+                b->disc_hash = hash_full(mem, total);
+                b->sample_hash = fnv_sample(mem, total);
+            } else
+                b->disc_hash = h;  // (the contents stay: reading them now would only bring the pages straight back)
+        }
+    }
+#endif
+    return true;
 }
+static void upload_texture(NvnTexture *t, TexBackend *b) { (void)upload_texture_impl(t, b, false); }
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     TexBackend *b = tex_backend(t);
@@ -1184,6 +1434,7 @@ static ViewEnt view_tab[VIEW_TAB];
 // Views may still be referenced by submitted or pending work: destroyed once that has completed.
 void vk_views_forget(TexBackend *b) { views_forget(b); }
 uint32_t vk_view_gen;  // bumped whenever a cached view may be destroyed (exec.c's per-frame texture memo)
+void vk_texture_views_drop(TexBackend *b);  // (lsfg/lsfg_present.c: its outputs, before they go)
 static void views_forget(TexBackend *b) {
     vk_view_gen++;
     for (int i = 0; i < VIEW_TAB; i++)
@@ -1247,23 +1498,54 @@ static int rt3d_mode(void) {
 
 // render: attachment view (one level, one layer). Otherwise a sampled view of type want_textype (TEXTYPE_*),
 // with the NVN component swizzle, converting between compatible types the way renderer.m does.
+static VkFormat view_format(VkFormat base_fmt, VkFormat bc_vf, VkImageAspectFlags aspect, bool fixed_fmt, VkFormat view_alt,
+                            const NvnTexture *t, const NvnTextureView *v, bool has_view, bool warn) {
+    if (!has_view) v = NULL;
+    VkFormat fmt = base_fmt;
+    if (v && (v->setmask & 4) && !(aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
+        VkFormat vf = fmt_of(v->format).vf;
+        if (vk_format(t->format) == base_fmt) fmt = vf;  // (fallback images keep their own format)
+#ifdef __ANDROID__
+        else if (bc_vf && is_bc(vf)) { uint32_t bpp; fmt = bc_target(vf, &bpp); }  // (decoded BC: its sRGB / UNORM view)
+#endif
+        if (fixed_fmt && fmt != base_fmt && fmt != view_alt) {  // (not in its format list: create_image)
+            if (warn) {
+                static int nlog;
+                if (nlog++ < 8) LOG("[vk] a view of render target %ux%u (nvn %#x) as nvn %#x: in its own format\n", t->width, t->height,
+                                    t->format, v->format);
+            }
+            fmt = base_fmt;
+        }
+    }
+    return fmt;
+}
+
+VkFormat vk_sampled_format(NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    if (!t) return VK_FORMAT_UNDEFINED;
+    if (t->backend) {
+        const TexBackend *b = (const TexBackend *)t->backend;
+#ifdef __ANDROID__
+        VkFormat bc_vf = b->bc_vf;
+#else
+        VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+#endif
+        return view_format(b->format, bc_vf, b->aspect, b->fixed_fmt, b->view_alt, t, v, has_view, false);
+    }
+    VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+    VkFormat vf = resolve_tex_format(t, &bc_vf, NULL, true);
+    VkImageAspectFlags asp = renderer_format_is_depth(t->format) ? aspect_of(t->format) : VK_IMAGE_ASPECT_COLOR_BIT;
+    return view_format(vf, bc_vf, asp, false, VK_FORMAT_UNDEFINED, t, v, has_view, false);
+}
+
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype) {
     TexBackend *b = vk_tex(t, render);
     if (!has_view) v = NULL;
-    VkFormat fmt = b->format;
-    if (v && (v->setmask & 4) && !(b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
-        VkFormat vf = fmt_of(v->format).vf;
-        if (vk_format(t->format) == b->format) fmt = vf;  // (fallback images keep their own format)
 #ifdef __ANDROID__
-        else if (b->bc_vf && is_bc(vf)) { uint32_t bpp; fmt = bc_target(vf, &bpp); }  // (decoded BC: its sRGB / UNORM view)
+    VkFormat bc_vf = b->bc_vf;
+#else
+    VkFormat bc_vf = VK_FORMAT_UNDEFINED;
 #endif
-        if (b->fixed_fmt && fmt != b->format && fmt != b->view_alt) {  // (not in its format list: create_image)
-            static int nlog;
-            if (nlog++ < 8) LOG("[vk] a view of render target %ux%u (nvn %#x) as nvn %#x: in its own format\n", t->width, t->height,
-                                t->format, v->format);
-            fmt = b->format;
-        }
-    }
+    VkFormat fmt = view_format(b->format, bc_vf, b->aspect, b->fixed_fmt, b->view_alt, t, v, has_view, true);
     uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
     uint32_t nlv = v && (v->setmask & 1) && v->num_levels ? v->num_levels : b->levels + b->skip - lv0;
     if (b->skip) {  // (the guest's levels, the image's from b->skip on: create_image)
@@ -1554,12 +1836,14 @@ static void bc_shadow_resolve(TexBackend *b) {
         vk_readback_ready(total);
         uint64_t t1 = SDL_GetTicksNS();
         cb = vk_cmd();
+        uint64_t bench_up_t = bench_clock();
         for (uint32_t i = 0; i < n; i++) {
             const VkBufferImageCopy *r = &rg[i];
             bc_upload_blocks(cb, b, (const uint8_t *)rb.ptr + (r->bufferOffset - rb.off), r->imageExtent.width,
                              r->imageExtent.height, s->bsize, r->imageSubresource.mipLevel,
                              r->imageSubresource.baseArrayLayer, (uint32_t)r->imageOffset.z, NULL);
         }
+        bench_io_done(BP_TEX_NS, BP_TEX_BYTES, bench_up_t, total);
         vk_full_barrier(cb);
         // (each decode: the GPU waited for - the render thread blocked - and the CPU's decode; the first 8, then every 64th)
         static uint64_t nres;
@@ -1601,6 +1885,24 @@ void vk_tex_upload_for_mips(NvnTexture *t) {
     if (nlog++ < 8) LOG("[vk] %ux%ux%u (nvn %#x) first drawn into at a level past 0: its CPU contents uploaded first\n",
                         t->width, t->height, t->depth, t->format);
     vk_tex(t, false);
+}
+
+// A write-back target drawn into at level 0 without a whole-target clear (LOAD_OP_LOAD): the pass keeps its
+// untouched texels and writes the whole image back to guest memory at the end (#296: an evicted 64x64 water height
+// clipmap tile drawn into along a 3-texel border wrote zeros back over the rest, dropping Link onto the riverbed).
+// Called once b->gpu_owned is set so tex_discard leaves guest pages alone; if never uploaded, uses s->upload, and if
+// already sampled (`b->uploaded`) with a subsequent CPU write before becoming gpu_owned, re-uploads in order on s->main.
+bool vk_tex_upload_for_load(NvnTexture *t) {
+    TexBackend *b = tex_backend(t);
+    extern uint64_t prof_up_ns;
+    uint64_t t0 = prof_up_ns != ~0ull ? SDL_GetTicksNS() : 0;
+    bool did = upload_texture_impl(t, b, true);
+    if (prof_up_ns != ~0ull) {
+        extern uint64_t prof_up_cum;
+        uint64_t d = SDL_GetTicksNS() - t0;
+        prof_up_ns += d, prof_up_cum += d;
+    }
+    return did;
 }
 
 // 1x1 black textures for unbound slots, per type
@@ -1669,6 +1971,46 @@ VkSampler vk_sampler_plain(NvnSamplerDesc *d) {
     return p;
 }
 
+bool vk_format_is_int(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT:
+    case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
+    case VK_FORMAT_R8G8B8_UINT: case VK_FORMAT_R8G8B8_SINT:
+    case VK_FORMAT_B8G8R8_UINT: case VK_FORMAT_B8G8R8_SINT:
+    case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R8G8B8A8_SINT:
+    case VK_FORMAT_B8G8R8A8_UINT: case VK_FORMAT_B8G8R8A8_SINT:
+    case VK_FORMAT_A8B8G8R8_UINT_PACK32: case VK_FORMAT_A8B8G8R8_SINT_PACK32:
+    case VK_FORMAT_A2R10G10B10_UINT_PACK32: case VK_FORMAT_A2R10G10B10_SINT_PACK32:
+    case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_A2B10G10R10_SINT_PACK32:
+    case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT:
+    case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16_SINT:
+    case VK_FORMAT_R16G16B16_UINT: case VK_FORMAT_R16G16B16_SINT:
+    case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R16G16B16A16_SINT:
+    case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT:
+    case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT:
+    case VK_FORMAT_R32G32B32_UINT: case VK_FORMAT_R32G32B32_SINT:
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT:
+    case VK_FORMAT_R64_UINT: case VK_FORMAT_R64_SINT:
+    case VK_FORMAT_S8_UINT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static _Atomic int g_any_no_linear;
+
+bool vk_any_format_no_linear(void) {
+    int v = atomic_load_explicit(&g_any_no_linear, memory_order_relaxed);
+    if (v & 1) return (v & 2) != 0;
+    int bits = 1;
+    if (!getenv("LARECOMP_NO_FILTER_FALLBACK") &&
+        !format_supports(VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+        bits |= 2;
+    v = atomic_fetch_or_explicit(&g_any_no_linear, bits, memory_order_relaxed) | bits;
+    return (v & 2) != 0;
+}
+
 // A format the GPU can't filter linearly (no SAMPLED_IMAGE_FILTER_LINEAR): undefined through a linear sampler. Mali's
 // drivers list R16G16B16A16_UNORM so - BOTW's grass reads one in its vertex shader, and an older driver returned
 // garbage: the grass stretched and black (#307 Immortalis-G715, #258 G68; #244, Propinbo). Those take the sampler's
@@ -1678,7 +2020,10 @@ bool vk_format_filters_linear(VkFormat f) {
     static int n;
     for (int i = 0; i < n; i++) if (cache[i].f == f) return cache[i].ok;
     bool ok = format_supports(f, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) || getenv("LARECOMP_NO_FILTER_FALLBACK");
-    if (!ok) LOG("[vk] format %d can't be filtered linearly on this GPU: its textures sampled nearest\n", f);
+    if (!ok) {
+        if (!vk_format_is_int(f)) atomic_fetch_or_explicit(&g_any_no_linear, 3, memory_order_relaxed);
+        LOG("[vk] format %d can't be filtered linearly on this GPU: its textures sampled nearest\n", f);
+    }
     if (n < 64) cache[n].f = f, cache[n].ok = ok, n++;
     return ok;
 }
@@ -1738,6 +2083,7 @@ static VkSampler make_sampler(const NvnSamplerDesc *d, bool compare) {
     static int stest = -1;
     if (stest < 0) stest = getenv("LARECOMP_SAMPLER_TEST") != NULL;
     if (stest && mf > 1) { si.minLod = 0; si.maxLod = VK_LOD_CLAMP_NONE; si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = 16; }
+    if (g_force_nearest) { si.anisotropyEnable = VK_FALSE; si.maxAnisotropy = 1.0f; }
     if (d->compare_mode && compare) {
         si.compareEnable = VK_TRUE;
         si.compareOp = getenv("LARECOMP_NO_SHADOW") ? VK_COMPARE_OP_ALWAYS : compare_op(d->compare_func);
@@ -1772,3 +2118,5 @@ VkSampler vk_default_sampler(bool linear) {
     }
     return s[linear];
 }
+
+void vk_texture_views_drop(TexBackend *b) { views_forget(b); }

@@ -55,6 +55,8 @@ import java.util.zip.ZipInputStream;
 
 public class BOTWRecompAndroidActivity extends SDLActivity {
     private static final String TAG = "BOTWRecompAndroid";
+    private static String bootState;
+    private static native void nativeMemoryPressure(int level, long available, long total, long threshold, boolean low, int pss);
 
     private final Handler stats = new Handler(Looper.getMainLooper());
     private final Runnable report = new Runnable() {
@@ -68,6 +70,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     private static native void nativeDeviceStats(float battTempC, float battPct, float watts, int thermal, float headroom, int plugged);
     // the start screen (runtime/ui/launcher.mm)
     private static native int nativeGameVersion(byte[] head);
+    private static native void nativeImportSearched(int folders);  // (the search's folders so far, every 10: #373)
     private static native void nativeImportLooking();  // (the picked folder is being searched: busy, and said so)
     private static native String nativeImportBegin(String name, int version);
     private static native void nativeImportProgress(long done, long total);
@@ -85,7 +88,9 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     private static native void nativeSaveDone(int result, String detail);
     private static final int REQ_GAME = 0x4c41, REQ_DRIVER = 0x4c42, REQ_MOD = 0x4c46, REQ_LOG = 0x4c47,
             REQ_DRIVER_RECOVER = 0x4c48, REQ_SAVE_IN = 0x4c49, REQ_SAVE_OUT = 0x4c4a, REQ_SAVE_IN_TREE = 0x4c4c,
-            REQ_DLC = 0x4c4d;
+            REQ_DLC = 0x4c4d,
+            REQ_LSFG_COPY = 0x4c61;  // (upstream's Lossless.dll copy - only with -DBOTW_LSFG=ON; ours is REQ_LSFG below)
+    private static native void nativeLsfgImported(int result, String detail);  // (0 imported, 1 cancelled, 2 failed)
     private native String nativeBuildDlc(String[] paths, long[] sizes);
     private static native String nativeBuildDlcPackage(int fd, boolean xci, int prodKeysFd, int titleKeysFd);
     private static final int REQ_DLC_PKG = 0x4c4e;
@@ -121,7 +126,9 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             copyIfChanged(new File(games, "botwgame.so"), new File(res, "botwgame.so"));
             copyIfChanged(new File(games, "botwgame.so.id"), new File(res, "botwgame.so.id"));
             setenv("LARECOMP_NATIVE_LIB_DIR", getApplicationInfo().nativeLibraryDir);
+            setenv("LARECOMP_APP", appLine());
             setenv("LARECOMP_LAST_EXIT", lastExit());
+            setenv("LARECOMP_BOOT_STATE", bootState());
             File gen = new File(getFilesDir(), "gen");
             unpackGen(gen);
             setenv("LARECOMP_GEN_DIR", gen.getAbsolutePath());
@@ -437,6 +444,12 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             }, "saves").start();
             return;
         }
+        if (req == REQ_LSFG_COPY) {
+            Uri f = result == Activity.RESULT_OK && data != null ? data.getData() : null;
+            if (f == null) nativeLsfgImported(1, "");
+            else new Thread(() -> importLsfgDll(f), "lsfg-dll").start();
+            return;
+        }
         if (req == REQ_LOG) {
             Uri tree = result == Activity.RESULT_OK && data != null ? data.getData() : null;
             if (tree != null) {
@@ -493,6 +506,38 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             return self.getPackageManager().getPackageInfo(self.getPackageName(), 0).versionName;
         } catch (Exception e) {
             return "";
+        }
+    }
+
+    // The start screen's banner (runtime/ui/launcher.mm banner_thread, on its own thread, never the UI's): url (https,
+    // or a file:// one for tests) saved to dst, at most maxBytes. false on any failure (offline, 404, too big): dst is
+    // then left as it was.
+    public static boolean download(String url, String dst, int maxBytes) {
+        File part = new File(dst + ".part");
+        try {
+            java.net.URLConnection c = new java.net.URL(url).openConnection();
+            c.setConnectTimeout(8000);
+            c.setReadTimeout(8000);
+            c.setUseCaches(false);
+            c.setRequestProperty("User-Agent", "BOTWRecompAndroid/" + appVersion());
+            if (c instanceof java.net.HttpURLConnection && ((java.net.HttpURLConnection) c).getResponseCode() != 200) {
+                ((java.net.HttpURLConnection) c).disconnect();
+                return false;
+            }
+            try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(part)) {
+                byte[] buf = new byte[65536];
+                long total = 0;
+                for (int n; (n = in.read(buf)) > 0;) {
+                    if ((total += n) > maxBytes) throw new IOException("over " + maxBytes + " bytes");
+                    out.write(buf, 0, n);
+                }
+            }
+            if (!part.renameTo(new File(dst))) throw new IOException("rename");
+            return true;
+        } catch (Exception e) {
+            Log.i(TAG, "banner: " + url + ": " + e);
+            part.delete();
+            return false;
         }
     }
 
@@ -567,6 +612,42 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             i.setType("*/*");  // (zip types vary by provider: application/zip, application/x-zip-compressed...)
             return i;
         });
+    }
+
+    // ---- frame generation's Lossless.dll (Video > Frame generation > Import Lossless.dll): a copy in the app's own
+    // files, which the runtime reads without All files access (vulkan/lsfg/lsfg_present.c vk_fg_dll_path, #437 #385)
+    public static void pickLsfgDll() {
+        self.runOnUiThread(() -> {
+            try {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                self.startActivityForResult(i, REQ_LSFG_COPY);
+            } catch (Exception e) {
+                Log.e(TAG, "Lossless.dll picker", e);
+                nativeLsfgImported(2, e.toString());
+            }
+        });
+    }
+
+    private void importLsfgDll(Uri u) {
+        File dir = getExternalFilesDir(null), tmp = new File(dir, "Lossless.dll.tmp"), dst = new File(dir, "Lossless.dll");
+        try (InputStream in = getContentResolver().openInputStream(u)) {
+            if (in == null) throw new IOException("can't open the file");
+            copy(in, tmp);
+            byte[] head = new byte[2];
+            try (InputStream h = new java.io.FileInputStream(tmp)) {
+                if (h.read(head) != 2 || head[0] != 'M' || head[1] != 'Z') throw new IOException("not a Windows DLL - pick Lossless.dll");
+            }
+            if (dst.exists() && !dst.delete()) throw new IOException("can't replace the copy before");
+            if (!tmp.renameTo(dst)) throw new IOException("can't put the copy in place");
+            Log.i(TAG, "Lossless.dll imported into " + dst + " (" + dst.length() + " bytes)");
+            nativeLsfgImported(0, dst.getAbsolutePath());
+        } catch (Exception e) {
+            tmp.delete();
+            Log.w(TAG, "Lossless.dll import", e);
+            nativeLsfgImported(2, e.getMessage() != null ? e.getMessage() : e.toString());
+        }
     }
 
     public static void pickSaveImportFolder() { pick(REQ_SAVE_IN_TREE, () -> new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)); }
@@ -958,9 +1039,12 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     // PC from the same files), used instead of building it on the phone when it's for this version and this app
     private Doc preLib, preId, preGame;
 
+    private int searched;  // (folders listed by find, since importGame began)
+
     private void find(Uri tree, Doc dir, int depth) {
         if (depth > 4 || (exefs != null && (romfs != null || romfsImage != null))) return;
         List<Doc> kids = children(tree, dir.id);
+        if (++searched % 10 == 0) nativeImportSearched(searched);
         if (preLib == null && named(kids, "botwgame.so") != null && named(kids, "botwgame.so.id") != null &&
             named(kids, "botwgame.so.game") != null) {
             preLib = named(kids, "botwgame.so");
@@ -1098,6 +1182,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             exefs = romfs = romfsImage = romfsImageDir = null;
             preLib = preId = preGame = null;
             listedTwice = 0;
+            searched = 0;
             packages = false;
             Doc root = new Doc();
             root.id = DocumentsContract.getTreeDocumentId(tree);
@@ -1309,6 +1394,54 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     private static boolean dlgDone;
     private static String dlgText;
 
+    // The fastest refresh the screen offers at its current resolution (vulkan/device.c, Frame rate 40 / 45): SDL knows
+    // only the current mode, and HyperOS keeps a game at 60 Hz on a 120 Hz screen until the window asks for more. 0:
+    // unknown.
+    public static float maxRefreshRate() {
+        BOTWRecompAndroidActivity a = self;
+        if (a == null) return 0;
+        try {
+            android.view.Display d = a.getDisplay();
+            if (d == null) return 0;
+            android.view.Display.Mode cur = d.getMode();
+            float best = 0;
+            for (android.view.Display.Mode m : d.getSupportedModes())
+                if (m.getPhysicalWidth() == cur.getPhysicalWidth() && m.getPhysicalHeight() == cur.getPhysicalHeight())
+                    best = Math.max(best, m.getRefreshRate());
+            return best;
+        } catch (Throwable t) {
+            Log.w("BOTWRecompAndroid", "maxRefreshRate: " + t);
+            return 0;
+        }
+    }
+
+    // The game's vibration on the phone's (or a handheld's) own motor, where the controller has none (hle/input.c
+    // input_rumble_apply, Controls > Vibration): a one-shot of ms at amplitude 1-255 the native side renews while the
+    // game keeps vibrating, so a stalled game stops it; 0 stops it now.
+    public static void vibrateDevice(int amplitude, int ms) {
+        BOTWRecompAndroidActivity a = self;
+        if (a == null) return;
+        try {
+            android.os.Vibrator v;
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                android.os.VibratorManager vm = (android.os.VibratorManager) a.getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
+                v = vm != null ? vm.getDefaultVibrator() : null;
+            } else {
+                v = (android.os.Vibrator) a.getSystemService(Context.VIBRATOR_SERVICE);
+            }
+            if (v == null || !v.hasVibrator()) return;
+            if (amplitude <= 0) { v.cancel(); return; }
+            int amp = v.hasAmplitudeControl() ? Math.max(1, Math.min(255, amplitude)) : android.os.VibrationEffect.DEFAULT_AMPLITUDE;
+            // as a game's (media), not the default touch feedback: with the phone's touch vibration off, HyperOS ignored
+            // every one ("ignored_for_settings", usage TOUCH - POCO F7 Ultra, 2026-11-14)
+            android.media.AudioAttributes aa = new android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_GAME).build();
+            v.vibrate(android.os.VibrationEffect.createOneShot(ms, amp), aa);
+        } catch (Throwable t) {
+            Log.w("BOTWRecompAndroid", "vibrateDevice: " + t);
+        }
+    }
+
     public static boolean driverErrorDialog(String text) {
         BOTWRecompAndroidActivity a = self;
         if (a == null) return false;
@@ -1372,6 +1505,19 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
 
     // How the previous run ended (ApplicationExitInfo), for the log: a setup that vanished with nothing in the log was
     // the system closing the app - for memory or something else (issue #18). "" when unknown.
+    // The log's first line: which build wrote it, on what ("0.4.0-beta (versionCode 39), Xiaomi 2510DPC44G, Android 16
+    // (API 36)") - the reports' logs couldn't be told apart by version.
+    private String appLine() {
+        String v = "?";
+        try {
+            android.content.pm.PackageInfo p = getPackageManager().getPackageInfo(getPackageName(), 0);
+            v = p.versionName + " (versionCode " + p.getLongVersionCode() + ")";
+        } catch (Exception ignored) {
+        }
+        return v + ", " + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL + ", Android "
+                + android.os.Build.VERSION.RELEASE + " (API " + android.os.Build.VERSION.SDK_INT + ")";
+    }
+
     private static final String[] EXIT_REASONS = {"unknown", "exit self", "signaled", "low memory", "crash", "native crash",
             "not responding", "initialization failure", "permission change", "excessive resource usage", "user requested",
             "user stopped", "dependency died", "other", "freezer", "package state change", "package updated"};
@@ -1388,6 +1534,40 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
                     e.getPss() / 1024, e.getRss() / 1024, e.getDescription());
         } catch (Exception e) {
             return "";
+        }
+    }
+
+    // A device reboot may leave no process crash report. Preserve the previous boot count
+    // once per process so activity recreation does not masquerade as a new test session.
+    private synchronized String bootState() {
+        if (bootState != null) return bootState;
+        int current = -1;
+        try { current = android.provider.Settings.Global.getInt(getContentResolver(),
+                android.provider.Settings.Global.BOOT_COUNT, -1); }
+        catch (Exception ignored) { /* Some firmware restricts access to this counter. */ }
+        android.content.SharedPreferences p = getSharedPreferences("crash_diagnostics", MODE_PRIVATE);
+        int previous = p.getInt("boot_count", -1);
+        bootState = "boot count " + current + ", previous session " + previous + ", uptime "
+                + android.os.SystemClock.elapsedRealtime() / 1000 + " s; "
+                + (current >= 0 && previous >= 0 ? (current > previous ? "system rebooted between sessions"
+                   : current == previous ? "same system boot" : "boot counter reset") : "reboot status unknown");
+        if (!p.edit().putInt("boot_count", current).commit())
+            Log.w(TAG, "could not persist boot counter for crash diagnostics");
+        return bootState;
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        try {
+            android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            android.app.ActivityManager.MemoryInfo info = new android.app.ActivityManager.MemoryInfo();
+            am.getMemoryInfo(info);
+            android.os.Debug.MemoryInfo process = new android.os.Debug.MemoryInfo();
+            android.os.Debug.getMemoryInfo(process);
+            nativeMemoryPressure(level, info.availMem, info.totalMem, info.threshold, info.lowMemory, process.getTotalPss());
+        } catch (Exception | UnsatisfiedLinkError e) {
+            Log.w(TAG, "memory pressure level " + level + " (details unavailable)");
         }
     }
 

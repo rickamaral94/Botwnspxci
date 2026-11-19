@@ -38,6 +38,22 @@ else
 fi
 
 run exec_caches python3 "$ROOT/tools/test_exec_caches.py"
+
+# (upstream 0.4.7's: job queue, object cache, .smeta cache, dynamic vertex input, pipeline prewarm - the last one
+# writes under /data/local/tmp on a phone: a copy pointed at $OUT here)
+if [ -n "$VKINC" ]; then
+    VKI="$(dirname "$(dirname "$VKINC")")"
+    for t in shader_job_queue object_cache shader_meta_cache dyn_vertex_input; do
+        run "$t" bash -c "'$CC' -std=gnu11 -O1 -g $SAN -I '$ROOT/runtime' -I '$ROOT/runtime/nvn' -I '$ROOT/runtime/nvn/vulkan' \
+            -I '$VKI' '$ROOT/tools/test_$t.c' -o '$OUT/test_$t' -lpthread -lm && '$OUT/test_$t' | tail -1"
+    done
+    run pipeline_prewarm bash -c "sed 's#/data/local/tmp#$OUT/dlt#g' '$ROOT/tools/test_pipeline_prewarm.c' > '$OUT/pw.c' && \
+        '$CC' -std=gnu11 -O1 -g -D__ANDROID__ $SAN -I '$ROOT/tools' -I '$ROOT/runtime' -I '$ROOT/runtime/nvn' \
+        -I '$ROOT/runtime/nvn/vulkan' -I '$VKI' '$OUT/pw.c' -o '$OUT/test_pw' -lpthread -lm 2>/dev/null && \
+        (cd '$OUT' && ./test_pw | tail -1)"
+else
+    skip+=("upstream unit tests (Vulkan headers)")
+fi
 run gamebuild_hot bash -c "python3 '$ROOT/tools/test_gamebuild_hot.py' | tail -1"
 run romfs_build bash -c "python3 '$ROOT/tools/test_romfs_build.py' | tail -1"
 
