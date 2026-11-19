@@ -1,0 +1,131 @@
+# Release BOTWDroid Amaral: o APK compilado a partir do código (nenhum arquivo do jogo, nenhuma chave de título, nenhum
+# Lossless.dll entra em nenhum passo), assinado com a chave fixa e publicado como pre-release com SHA256SUMS.
+#
+# Disparo: Actions > release > Run workflow (tag, ex.: v0.4.7-beta-amaral.5).
+# Chave fixa (docs/SIGNING-AMARAL.md, a de 14/11/2026) em secrets do repositório:
+#   BOTW_KEYSTORE_B64  o .p12 em base64 (base64 -w0 botwdroid-amaral-2026-11-14.p12)
+#   BOTW_KS_PASS       a senha do keystore (e da chave)
+#   BOTW_KEY_ALIAS     o alias (botwdroid-amaral)
+# Sem eles o job falha: não existe chave temporária. O certificado do APK é conferido contra o SHA-256 registrado em
+# docs/SIGNING-AMARAL.md antes de publicar. (Modelo: a release do port de GTA V, rickamaral94/Gtavport.)
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag da release (ex.: v0.4.7-beta-amaral.5)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  NDK_VERSION: "30.0.16248370"
+  CMAKE_VERSION: "3.30.4"
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: A chave fixa está cadastrada
+        env:
+          KS: ${{ secrets.BOTW_KEYSTORE_B64 }}
+          PASS: ${{ secrets.BOTW_KS_PASS }}
+          ALIAS: ${{ secrets.BOTW_KEY_ALIAS }}
+        run: |
+          if [ -z "$KS" ] || [ -z "$PASS" ] || [ -z "$ALIAS" ]; then
+            echo "::error::Faltam os secrets BOTW_KEYSTORE_B64 / BOTW_KS_PASS / BOTW_KEY_ALIAS (docs/SIGNING-AMARAL.md)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Submódulos (dxbc pelo mesmo commit num fork, se a origem sumir - docs/HANDOFF-CLAUDE-2026-11-04.md)
+        run: |
+          git submodule update --init --recursive || {
+            d=third_party/lsfg-vk-android/thirdparty/dxbc
+            git -C third_party/lsfg-vk-android submodule set-url thirdparty/dxbc https://github.com/manuelgzz/dxbc.git
+            git submodule update --init --recursive
+            git -C "$d" rev-parse HEAD
+          }
+
+      - name: Liberar disco
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL && df -h /
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: SDK, NDK e CMake
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" \
+            "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" > /dev/null
+          echo "sdk.dir=$ANDROID_HOME" > android/botwrecompandroid/local.properties
+
+      - uses: actions/cache@v4
+        id: deps
+        with:
+          path: android/deps/out
+          key: deps-${{ env.NDK_VERSION }}-${{ hashFiles('android/deps/*.sh', 'android/deps/*.patch', 'android/gen/**') }}
+
+      - name: Dependências nativas (SDL3, shaderc, FFmpeg, Unicorn, Python/Zig do gerador)
+        if: steps.deps.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          sudo apt-get install -y --no-install-recommends ninja-build > /dev/null
+          for s in build_deps.sh build_ffmpeg.sh build_unicorn.sh build_gen_deps.sh; do
+            echo "== $s"; bash android/deps/$s
+          done
+
+      - name: Testes de host
+        run: bash tools/run_host_tests.sh
+
+      - name: Chave fora do repositório
+        env:
+          KS: ${{ secrets.BOTW_KEYSTORE_B64 }}
+          PASS: ${{ secrets.BOTW_KS_PASS }}
+          ALIAS: ${{ secrets.BOTW_KEY_ALIAS }}
+        run: |
+          mkdir -p ~/.botwrecompandroid && chmod 700 ~/.botwrecompandroid
+          printf '%s' "$KS" | base64 -d > ~/.botwrecompandroid/release.p12
+          { echo "storeFile=$HOME/.botwrecompandroid/release.p12"; echo "storePassword=$PASS"; echo "keyAlias=$ALIAS";
+            echo "keyPassword=$PASS"; } > ~/.botwrecompandroid/keystore.properties
+          chmod 600 ~/.botwrecompandroid/*
+
+      - name: assembleRelease
+        working-directory: android/botwrecompandroid
+        run: bash ./gradlew assembleRelease --no-daemon
+
+      - name: Assinatura v3 e certificado conferido
+        env:
+          PASS: ${{ secrets.BOTW_KS_PASS }}
+          ALIAS: ${{ secrets.BOTW_KEY_ALIAS }}
+        run: |
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          src=$(ls android/botwrecompandroid/app/build/outputs/apk/release/*.apk | head -1)
+          ver=$(grep -oP 'versionName = "\K[^"]+' android/botwrecompandroid/app/build.gradle.kts)
+          mkdir -p out
+          apk="out/BOTWDroid-Amaral-$ver.apk"
+          "$BT/zipalign" -f -p 4 "$src" out/aligned.apk
+          "$BT/apksigner" sign --ks ~/.botwrecompandroid/release.p12 --ks-pass env:PASS --ks-key-alias "$ALIAS" \
+            --key-pass env:PASS --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled true \
+            --out "$apk" out/aligned.apk
+          rm out/aligned.apk
+          "$BT/apksigner" verify --verbose "$apk" | grep -E "v3 scheme.*true"
+          got=$("$BT/apksigner" verify --print-certs "$apk" | grep -oP 'SHA-256 digest: \K[0-9a-f]+' | head -1)
+          want=$(grep -oP 'Certificado SHA-256: `\K[0-9a-f]{64}' docs/SIGNING-AMARAL.md | head -1)
+          echo "certificado: $got (registrado: $want)"
+          [ -n "$got" ] && [ "$got" = "$want" ] || { echo "::error::certificado diferente do registrado"; exit 1; }
+          (cd out && sha256sum *.apk > SHA256SUMS && cat SHA256SUMS)
+          rm -rf ~/.botwrecompandroid
+
+      - name: Pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$TAG" out/*.apk out/SHA256SUMS --prerelease --target "$GITHUB_SHA" --title "$TAG" \
+            --notes "BOTWDroid Amaral $TAG. Nenhum arquivo do jogo incluído: use os seus. Certificado SHA-256 em docs/SIGNING-AMARAL.md; confira com SHA256SUMS."
