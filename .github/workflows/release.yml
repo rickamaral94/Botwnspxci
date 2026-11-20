@@ -77,10 +77,12 @@ jobs:
 
       - name: Dependências nativas (SDL3, shaderc, FFmpeg, Unicorn, Python/Zig do gerador)
         if: steps.deps.outputs.cache-hit != 'true'
-        env:
-          ANDROID_NDK: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
         run: |
-          sudo apt-get install -y --no-install-recommends ninja-build > /dev/null
+          # (ANDROID_HOME is the runner's, not in the workflow's env context: set here. FFmpeg's and Unicorn's scripts
+          # read ANDROID_NDK_LINUX)
+          export ANDROID_NDK="$ANDROID_HOME/ndk/$NDK_VERSION" ANDROID_NDK_LINUX="$ANDROID_HOME/ndk/$NDK_VERSION"
+          ls "$ANDROID_NDK/build/cmake/android.toolchain.cmake"
+          sudo apt-get install -y --no-install-recommends ninja-build nasm > /dev/null
           for s in build_deps.sh build_ffmpeg.sh build_unicorn.sh build_gen_deps.sh; do
             echo "== $s"; bash android/deps/$s
           done
