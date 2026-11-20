@@ -1982,7 +1982,7 @@ presented:;
             static int pp_env = -1;
             if (pp_env < 0) pp_env = !getenv("LARECOMP_DIAG_PASSES") || atoi(getenv("LARECOMP_DIAG_PASSES")) != 0;
             if (g_gp_auto && !(total_frames % 30)) vk_passprof_collect(), g_gp_auto = false;
-            if (pp_env && diag_want_gpu_ts() && !(total_frames % 30) && !getenv("LARECOMP_GPUPROF_AT"))
+            if (pp_env && diag_want_gpu_ts() && diag_in_gameplay() && !(total_frames % 30) && !getenv("LARECOMP_GPUPROF_AT"))
                 g_gpuprof_frame = g_gp_auto = true;
         }
         const char *e = getenv("LARECOMP_GPUPROF_AT");

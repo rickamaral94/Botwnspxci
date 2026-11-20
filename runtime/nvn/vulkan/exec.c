@@ -1067,7 +1067,7 @@ void vk_gp_note(VkCommandBuffer cb, const char *what) { gp_mark(cb, "%s", what);
 // half a second later (no wait), the GPU time summed by pass kind (its targets' count, size and format) in 2 s windows
 // - the report compares the heaviest window with the lightest: which kind of pass grew (the GTA V port's per-pass
 // profile, which found the HDR pass that blew up)
-#define PP_KINDS 48
+#define PP_KINDS 96
 #define PP_WIN 96
 typedef struct { uint64_t h; char label[80]; double ms; } PpKind;
 typedef struct { uint64_t t0; int frames; double ms; int nk; PpKind k[PP_KINDS]; } PpWin;
@@ -1100,12 +1100,16 @@ void vk_passprof_collect(void) {
         if (t[i + 1] < t[i]) continue;
         double ms = (t[i + 1] - t[i]) * per;
         w->ms += ms;
-        uint64_t h = pp_label_hash(gp_label[i]);
+        char kind[80];  // (the pass by its targets: without the ", first fs <hash>" of LARECOMP_GPUPROF_AT's rows)
+        snprintf(kind, sizeof kind, "%s", gp_label[i]);
+        char *fs = strstr(kind, ", first fs ");
+        if (fs) *fs = 0;
+        uint64_t h = pp_label_hash(kind);
         int k = 0;
         while (k < w->nk && w->k[k].h != h) k++;
         if (k == w->nk) {
             if (w->nk >= PP_KINDS) k = PP_KINDS - 1, h = 1, snprintf(w->k[k].label, sizeof w->k[k].label, "(other kinds)");
-            else w->nk++, w->k[k].h = h, snprintf(w->k[k].label, sizeof w->k[k].label, "%s", gp_label[i]);
+            else w->nk++, w->k[k].h = h, snprintf(w->k[k].label, sizeof w->k[k].label, "%s", kind);
             w->k[k].h = h;
         }
         w->k[k].ms += ms;
@@ -1126,8 +1130,8 @@ void vk_passprof_report(void (*emit)(const char *line)) {
         if (lo < 0 || m < pp_win[lo].ms / pp_win[lo].frames) lo = i;
         if (hi < 0 || m > pp_win[hi].ms / pp_win[hi].frames) hi = i;
     }
-    if (lo < 0 || hi == lo) { emit("GPU per pass kind: too few sampled frames"); return; }
-    snprintf(line, sizeof line, "GPU per pass kind, a frame sampled every 0.5 s: heaviest 2 s window (#%d) %.2f ms a frame, "
+    if (lo < 0 || hi == lo) { emit("GPU per pass kind: too few sampled gameplay frames"); return; }
+    snprintf(line, sizeof line, "GPU per pass kind, a gameplay frame sampled every 30: heaviest 2 s window (#%d) %.2f ms a frame, "
              "lightest (#%d) %.2f ms; kinds by the heaviest's time:", hi, pp_win[hi].ms / pp_win[hi].frames, lo,
              pp_win[lo].ms / pp_win[lo].frames);
     emit(line);
@@ -7707,7 +7711,7 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
 // (Amaral.5: our own warm-up replay, cache/pipe_warm.bin, gave way to upstream's prewarm - pipeline_prewarm.inc,
 // Video > Pipeline prewarming - and this line compares it on and off.)
 typedef struct { uint64_t code[2]; uint64_t t; } WarmSet;
-#define WARM_Q 1024
+#define WARM_Q 8192  // (a save loading sets thousands before the first present drains them: 1024 dropped 794)
 static WarmSet warm_q[WARM_Q];
 static int warm_qn;
 static _Atomic int warm_qpending;
