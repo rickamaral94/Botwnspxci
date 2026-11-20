@@ -83,7 +83,7 @@ jobs:
           export ANDROID_NDK="$ANDROID_HOME/ndk/$NDK_VERSION" ANDROID_NDK_LINUX="$ANDROID_HOME/ndk/$NDK_VERSION"
           ls "$ANDROID_NDK/build/cmake/android.toolchain.cmake"
           sudo apt-get install -y --no-install-recommends ninja-build nasm > /dev/null
-          for s in build_deps.sh build_ffmpeg.sh build_unicorn.sh build_gen_deps.sh; do
+          for s in build_deps.sh build_ffmpeg.sh build_gen_deps.sh; do  # (build_gen_deps.sh fetches unicorn and runs build_unicorn.sh)
             echo "== $s"; bash android/deps/$s
           done
 
