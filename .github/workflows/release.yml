@@ -40,6 +40,8 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # (tools/test_romfs_build.py compares with an older commit's romfs_build.c)
 
       - name: Submódulos (dxbc da cópia em third_party/vendor - a origem deixou de ser pública)
         run: |

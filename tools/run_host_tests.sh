@@ -15,6 +15,8 @@ pass=() fail=() skip=()
 
 run() {  # name, command...
     local name="$1"; shift
+    # (bash -c "... | tail -1": the test's own status, not tail's - a failed romfs_build counted as passed, 20/11)
+    if [ "$1" = bash ]; then shift; set -- bash -o pipefail "$@"; fi
     echo "== $name"
     if "$@"; then pass+=("$name"); else fail+=("$name"); fi
 }
