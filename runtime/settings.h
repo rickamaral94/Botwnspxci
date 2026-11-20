@@ -65,8 +65,11 @@ typedef struct {
     int perf_log;         // Android: the start screen's Performance logs - 0 off, 1 the next game, 2 every start: the first
                           // 60 s of play measured (diag.c), kept across restarts (main.c; from the GTA V port)
     bool early_z;         // Android: Video > Early depth test - depth / stencil tested before the fragment shader where the
-                          // draw writes neither, discards included (vulkan/exec.c early_z_on; GTA V port; on by default)
-    bool pipe_prewarm;    // Android: recorded graphics pipelines built while a save loads (vulkan/exec.c; experimental, off by default)
+                          // draw writes neither, discards included (vulkan/exec.c early_z_on; GTA V port). Off by default
+                          // since Amaral.6: Turnip already tests early there (the Turnip agent, 20/11), and the variants
+                          // it makes are programs to build
+    int pipe_prewarm;     // Android: recorded graphics pipelines built while a save loads (vulkan/exec.c prewarm_enabled):
+                          // -1 automatic (on with Turnip - Amaral.6: the first-sight pipelines were the stutters), 1 on, 0 off
     bool files_in_place;  // Android: a setup reads the picked romfs/ where it is, no copy (services/fs.c); off by default
     bool sync_lag;        // Android: the game's next frame overlaps the GPU's last (nvn/objects.c nvnSyncWait); on by default
     int low_ram;          // RAM saving (vulkan/exec.c vk_low_ram): -1 automatic (devices up to 4 GB), 1 on, 0 off; read once,

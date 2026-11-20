@@ -80,8 +80,8 @@ Settings g_settings = {
 #ifdef __ANDROID__
     .upscaler = UPSCALE_SGSR1,  // (one pass: ~1 ms on the Adreno 830 to 2560x1440, FSR 1's two ~2.7 ms; 40 fps against 38)
     .native_code = false,       // (an experiment: runtime/native.c)
-    .pipe_prewarm = false,      // (an experiment: vulkan/pipeline_prewarm.inc)
-    .early_z = true,
+    .pipe_prewarm = -1,         // (vulkan/pipeline_prewarm.inc: automatic - on with Turnip)
+    .early_z = false,
     .perf_log = 0,
     .sync_lag = true,           // (a few more fps; the CPU's reads of GPU results a frame old: nvn/objects.c nvnSyncWait)
     .out_lines = OUT_AUTO,      // (POCO F7 Ultra, 3200x1440, 1.8.2's Great Plateau: GPU 22.8 ms a frame at the screen's,
@@ -321,8 +321,10 @@ void settings_load(void) {
         else if (!strcmp(key, "shader_int32")) g_settings.shader_int32 = atoi(val) != 0;
         else if (!strcmp(key, "sync_lag")) g_settings.sync_lag = atoi(val) != 0;
         else if (!strcmp(key, "native_code")) g_settings.native_code = atoi(val) != 0;
-        else if (!strcmp(key, "pipe_prewarm")) g_settings.pipe_prewarm = atoi(val) != 0;
-        else if (!strcmp(key, "early_depth_test")) g_settings.early_z = atoi(val) != 0;
+        else if (!strcmp(key, "pipeline_prewarm")) g_settings.pipe_prewarm = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
+        // (pipe_prewarm, 0.4.7's on / off key, is ignored: every ini of it says 0, its old default - Automatic instead)
+        else if (!strcmp(key, "early_z")) g_settings.early_z = atoi(val) != 0;
+        // (early_depth_test, Amaral.5's key, is ignored: it saved its default 1 - Amaral.6's default is off)
         else if (!strcmp(key, "perf_log")) g_settings.perf_log = atoi(val) < 0 || atoi(val) > 2 ? 0 : atoi(val);
         else if (!strcmp(key, "files_in_place")) g_settings.files_in_place = atoi(val) != 0;
         else if (!strcmp(key, "gpu_heap")) g_settings.gpu_heap = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
@@ -445,8 +447,9 @@ void settings_save(void) {
     fprintf(f, "shader_int32 = %d\nsync_lag = %d\nnative_code = %d\nfiles_in_place = %d\n", g_settings.shader_int32,
             g_settings.sync_lag, g_settings.native_code, g_settings.files_in_place);
     fprintf(f, "gcopy_range = %d\n", g_settings.gcopy_range);
-    fprintf(f, "pipe_prewarm = %d\n", g_settings.pipe_prewarm ? 1 : 0);
-    fprintf(f, "early_depth_test = %d\n", g_settings.early_z ? 1 : 0);
+    if (g_settings.pipe_prewarm < 0) fprintf(f, "pipeline_prewarm = auto\n");
+    else fprintf(f, "pipeline_prewarm = %d\n", g_settings.pipe_prewarm ? 1 : 0);
+    fprintf(f, "early_z = %d\n", g_settings.early_z ? 1 : 0);
     fprintf(f, "perf_log = %d\n", g_settings.perf_log);
     static const char *const tri[] = {"auto", "0", "1"};  // (-1 / 0 / 1)
 #define TRI(v) tri[(v) < 0 ? 0 : (v) ? 2 : 1]

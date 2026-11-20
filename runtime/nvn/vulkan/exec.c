@@ -3224,7 +3224,10 @@ static bool prewarm_enabled(void) {
         e = (v && *v) ? (atoi(v) != 0) : -1;
         atomic_store_explicit(&pw_env, e, memory_order_relaxed);
     }
-    return e >= 0 ? e != 0 : __atomic_load_n(&g_settings.pipe_prewarm, __ATOMIC_RELAXED);
+    if (e >= 0) return e != 0;
+    int s = __atomic_load_n(&g_settings.pipe_prewarm, __ATOMIC_RELAXED);
+    extern bool vk_driver_is_turnip(void);
+    return s < 0 ? vk_driver_is_turnip() : s != 0;  // (automatic: Turnip - Odin 2, 20/11: 2,288 pipelines made in play)
 }
 #endif
 typedef struct {
@@ -3253,6 +3256,7 @@ typedef struct {
     uint8_t evict;      // (prog_evict, vk_exec_reset) 1: to be freed, 2: kept - a pipeline of its still building
     uint32_t used_s;    // when a draw last used it (g_exec_s), and that submission (prog_evict)
     uint64_t used_seq;
+    uint32_t npipes;    // (pipeline measurement: its pipelines made so far - the first one is the program's, the rest state)
 } Prog;
 
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
@@ -7719,6 +7723,22 @@ static pthread_mutex_t warm_qlock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t warm_qdropped;
 // when each code pair was set (render thread), for the time to its first draw
 static struct { uint64_t vs, fs, t; } warm_set_at[4096];
+// The pipelines new in play by what was new in them (what VK_EXT_graphics_pipeline_library would save - the Turnip
+// agent, 20/11: a library is compiled once per stage, a fast link costs ~0.08 ms): 0 both shaders never seen, 1 the
+// fragment shader seen with another vertex shader (a library saves it all), 2 the vertex shader seen with another
+// fragment shader, 3 both seen, a new pair, 4 the program's pipelines after its first (state only: blend, formats,
+// topology - ~0.1 ms on Turnip already)
+static uint64_t w_kind[5], t_kind[5];
+static struct { uint64_t vs, fs; } seen_stage[8192];  // (code addresses seen in a program: open addressing)
+static bool stage_seen(uint64_t code, bool fs, bool add) {
+    unsigned i = (unsigned)(((code ^ (fs ? 0x5bd1e995ull : 0)) * 0x9E3779B97F4A7C15ull) >> 51);
+    for (int n = 0; n < 8192; n++, i = (i + 1) & 8191) {
+        uint64_t *slot = fs ? &seen_stage[i].fs : &seen_stage[i].vs;
+        if (*slot == code) return true;
+        if (!*slot) { if (add) *slot = code; return false; }
+    }
+    return false;
+}
 // counters: this 10 s window (w_) and since the start (t_)
 static uint64_t w_prog, w_pipe, w_skip_shader, w_skip_pipe, w_waits, w_lead_none, t_prog, t_pipe, t_skip, t_waits;
 static uint32_t w_lead[1024];
@@ -7768,8 +7788,13 @@ static void warm_program_seen(const uint64_t code[2]) {
 
 // (draw_) a pipeline new at a draw: in play counted
 static void warm_pipeline_new(Pipe *pp) {
-    (void)pp;
-    if (diag_in_gameplay()) w_pipe++, t_pipe++;
+    Prog *p = pp->k.prog;
+    int kind = 4;
+    if (p && !p->npipes++) {
+        bool vs = stage_seen(p->code[0], false, true), fs = stage_seen(p->code[1], true, true);
+        kind = !vs && !fs ? 0 : fs && !vs ? 1 : vs && !fs ? 2 : 3;
+    }
+    if (diag_in_gameplay()) w_pipe++, t_pipe++, w_kind[kind]++, t_kind[kind]++;
 }
 
 static int warm_cmp_u32(const void *a, const void *b) {
@@ -7792,6 +7817,12 @@ static void warm_stats(void) {
             (unsigned long long)w_prog, (unsigned long long)w_pipe, (unsigned long long)w_skip_shader,
             (unsigned long long)w_skip_pipe, (unsigned long long)w_waits, p50, p95, w_nlead, (unsigned long long)w_lead_none,
             prewarm_enabled() ? "on" : "off", (unsigned long long)warm_qdropped);
+    if (w_pipe)
+        LOG("[pipe-kind] 10 s in play: %llu pipelines - new shaders %llu, FS seen + new VS %llu, VS seen + new FS %llu, "
+            "both seen %llu, state only %llu\n", (unsigned long long)w_pipe, (unsigned long long)w_kind[0],
+            (unsigned long long)w_kind[1], (unsigned long long)w_kind[2], (unsigned long long)w_kind[3],
+            (unsigned long long)w_kind[4]);
+    memset(w_kind, 0, sizeof w_kind);
     {   // (the G-buffer alias case, is_attachment_entry: every 10 s)
         static uint64_t alias_last;
         LOG("[alias] 10 s: %llu draws into a level / layer other than 0 sampling a view that covers it (%llu since the start)\n",
@@ -7803,10 +7834,12 @@ static void warm_stats(void) {
 }
 // (diag.c, the performance report) since the start
 void vk_warm_summary(char *out, size_t n) {
-    snprintf(out, n, "new in play: %llu programs, %llu pipelines; skipped draws %llu, waits %llu; upstream prewarm %s",
-             (unsigned long long)t_prog, (unsigned long long)t_pipe,
-             (unsigned long long)(t_skip + w_skip_shader + w_skip_pipe), (unsigned long long)(t_waits + w_waits),
-             prewarm_enabled() ? "on" : "off");
+    snprintf(out, n, "new in play: %llu programs, %llu pipelines (new shaders %llu, FS seen + new VS %llu, VS seen + new "
+             "FS %llu, both seen %llu, state only %llu); skipped draws %llu, waits %llu; upstream prewarm %s",
+             (unsigned long long)t_prog, (unsigned long long)t_pipe, (unsigned long long)t_kind[0],
+             (unsigned long long)t_kind[1], (unsigned long long)t_kind[2], (unsigned long long)t_kind[3],
+             (unsigned long long)t_kind[4], (unsigned long long)(t_skip + w_skip_shader + w_skip_pipe),
+             (unsigned long long)(t_waits + w_waits), prewarm_enabled() ? "on" : "off");
 }
 // (device.c, each frame presented) the queue of programs set
 void vk_warm_frame(void) { warm_drain(); }

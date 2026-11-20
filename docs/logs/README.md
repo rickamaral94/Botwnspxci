@@ -12,6 +12,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [Revisão do repositório, 12/11](2026-11-12-revisao-repo.md) | Amaral.2, host | Sem perdas do upstream; merge do upstream registrado; testes no repositório (`tools/run_host_tests.sh`). O cache de vértices não age no Odin com o Turnip. |
 | [Amaral.3, 12/11](2026-11-12-amaral3.md) | Host | Pré-aquecimento de pipelines (opção experimental, desligada) e medição de programas e pipelines em jogo; contador do caso de alias do G-buffer, ainda sem correção. Testes no Odin pendentes. |
 | [Amaral.5, 19/11](2026-11-19-amaral5.md) | Host, APK 43 | Upstream 0.4.7 (fence por submissão, vertex input dinâmico, pré-aquecimento do upstream no lugar do nosso); do GTA V: teste de profundidade antecipado, logs de desempenho, GPU por tipo de passe, release por CI. Testes no Odin pendentes. |
+| [Amaral.6, 20/11](2026-11-20-amaral6.md) | Host, APK 44 | Travadas de primeira passagem: pré-aquecimento do upstream em Automático (ligado com o Turnip), teste antecipado desligado (o Turnip já faz EARLY_Z), classificação dos pipelines para decidir o pipeline library. Decidido com o agente do Turnip. |
 
 ## Revisões externas e Turnip
 

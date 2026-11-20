@@ -641,10 +641,11 @@ static void tab_display(void) {
                "flatter and evenly lit, for a little less GPU work each frame; only worth it on a phone at its limit. "
                "Applies at once.");
 #ifdef __ANDROID__
-    opt_toggle("Early depth test", &g_settings.early_z, true,
+    opt_toggle("Early depth test", &g_settings.early_z, false,
                "Draws that write no depth test it before their shader runs, even shaders that cut out leaves and grass "
-               "with a discard: the hidden pixels are never shaded, for less GPU work - the same picture. Turn it off if "
-               "something looks wrong. \"Measure and compare\", on the start screen, tests it on and off. Applies at once.");
+               "with a discard. Turnip already does this on its own, so it is off: each draw it changes needs a program "
+               "of its own, which is one more thing to build. For tests on other drivers. \"Measure and compare\", on "
+               "the start screen, tests it on and off. Applies at once.");
 #endif
 #ifdef BOTW_UPSTREAM_LSFG  // (Amaral builds: ours, vulkan/framegen.c, has its own section)
     {   // Frame generation (vulkan/lsfg/lsfg_present.c): Lossless Scaling's LSFG with the player's own Lossless.dll
@@ -801,9 +802,15 @@ static void tab_display(void) {
     opt_toggle("Native game code (experimental)", &g_settings.native_code, false,
                "Runs the game's own code directly on the phone's CPU instead of the game code built at setup: no build "
                "needed. An experiment - report what goes wrong. Applies the next time the game starts.");
-    opt_toggle("Pipeline prewarming (experimental)", &g_settings.pipe_prewarm, false,
-               "Records graphics pipelines used in the world and builds them on background workers while a save loads, so "
-               "fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.");
+    {   // (vulkan/exec.c prewarm_enabled; display order -> pipe_prewarm -1 / 1 / 0)
+        static const char *pw[] = {"Automatic", "On", "Off"};
+        int pi = g_settings.pipe_prewarm < 0 ? 0 : g_settings.pipe_prewarm ? 1 : 2;
+        if (opt_choice("Pipeline prewarming", &pi, pw, 3, 0,
+                       "Records graphics pipelines used in the world and builds them on background workers while a save "
+                       "loads, so fewer draws wait or skip - fewer stutters - the first time through a place. Automatic: on "
+                       "with Turnip. Applies the next time a save loads."))
+            g_settings.pipe_prewarm = pi == 0 ? -1 : pi == 1 ? 1 : 0;
+    }
     opt_toggle("32-bit shader math", &g_settings.shader_int32, false,
                "Translates the game's shaders with 32-bit address math, the path used for drivers without 64-bit "
                "integers (Adreno 6xx / 7xx and Mali stock drivers). Try it if lighting, grass or text are missing or wrong "
