@@ -58,3 +58,15 @@ vem no APK.
 | `tools/run_host_tests.sh` | 16 de 16 |
 | `assembleDebug` | compilou |
 | No Odin | as melhorias acima foram medidas nas sessões citadas; a combinação final não foi rodada como um todo |
+
+## Publicação
+
+Release (não pre-release, marcada como a mais recente)
+[`v0.4.11-amaral.17`](https://github.com/rickamaral94/Botwnspxci/releases/tag/v0.4.11-amaral.17), do commit `14aea1b`,
+pelo workflow `release`. O workflow conferiu o certificado (a chave de 14/11), então ela instala por cima das
+anteriores.
+
+| Arquivo | SHA-256 |
+| --- | --- |
+| `BOTWDroid-Amaral-0.4.11-amaral.17.apk` (90.969.243 bytes) | `d87cbc724d2e777f9652ef31e27f55a14fe720e0a33bf92ebc65a64f481b975a` |
+| `libmain-symbols-0.4.11-amaral.17.so.gz` | `5868ba268f7e1732720ada7b9ee1b74db6940a6fb6b7165f572c0bac8623166a` |
