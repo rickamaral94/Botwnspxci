@@ -10685,12 +10685,15 @@ VkImageView vk_fg_hud_mask(VkCommandBuffer cb, TexBackend *p, VkExtent2D e, floa
     hud_cap_b = NULL;  // (the next frame takes its own)
     if (!have) return VK_NULL_HANDLE;
     TexBackend *pre = post_image(7, b->width, b->height, b->format);
-    TexBackend *m = post_image(8, b->width, b->height, VK_FORMAT_R8G8B8A8_UNORM);
+    static int full = -1;  // (LARECOMP_FG_HUD_MASK_FULL=1: the mask at the image's size, as before Amaral.13)
+    if (full < 0) full = getenv("LARECOMP_FG_HUD_MASK_FULL") && atoi(getenv("LARECOMP_FG_HUD_MASK_FULL")) != 0;
+    uint32_t mw_ = full ? b->width : (b->width + 1) / 2, mh_ = full ? b->height : (b->height + 1) / 2;
+    TexBackend *m = post_image(8, mw_, mh_, VK_FORMAT_R8G8B8A8_UNORM);
     float w = (float)b->width, h = (float)b->height;
     float pc[8] = {1.0f / w, 1.0f / h, w, h, 3.0f / 255.0f, 40.0f / 255.0f};  // (the difference that starts / makes HUD)
     VkImageView in[3] = {post_view(b), post_view(pre)};
-    gp_mark(cb, "framegen: HUD mask %ux%u", b->width, b->height);
-    post_pass(cb, "fg_hud_mask.frag", in, 2, m, pc, false);
+    gp_mark(cb, "framegen: HUD mask %ux%u%s", b->width, b->height, full ? "" : " (half)");
+    post_pass(cb, full ? "fg_hud_mask.frag" : "fg_hud_mask_half.frag", in, 2, m, pc, false);
     const VkFormat f = VK_FORMAT_R8G8B8A8_UNORM;
     TexBackend *mw = post_image(9, e.width, e.height, f);
     vk_full_barrier(cb);

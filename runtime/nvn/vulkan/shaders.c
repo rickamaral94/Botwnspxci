@@ -356,6 +356,30 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(smoothstep(pc.b.x, pc.b.y, m), 0.0, 0.0, 1.0);\n"
                "}\n";
     }
+    // (Amaral.13) fg_hud_mask_half.frag: the same at half the size - each texel the 2 x 2 pixels it covers, compared
+    // through one bilinear tap of both images at their shared corner (their mean), at 3 x 3 such taps 2 pixels apart:
+    // the same 6-pixel span as the full one's, a quarter of the pixels and half the taps. The Odin's full one cost
+    // 2.8 ms of GPU a real frame (Amaral.12) of ~27-31. pc.a.xy: 1 / the full size.
+    if (!strcmp(name, "fg_hud_mask_half.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "float d(vec2 c) {\n"
+               "  vec2 uv = c * pc.a.xy;\n"
+               "  vec3 e = abs(textureLod(t0, uv, 0.0).rgb - textureLod(t1, uv, 0.0).rgb);\n"
+               "  return max(e.r, max(e.g, e.b));\n"
+               "}\n"
+               "void main() {\n"
+               "  vec2 c = floor(gl_FragCoord.xy) * 2.0 + 1.0;\n"
+               "  float m = 0.0;\n"
+               "  for (int y = -2; y <= 2; y += 2)\n"
+               "    for (int x = -2; x <= 2; x += 2) m = max(m, d(c + vec2(x, y)));\n"
+               "  o = vec4(smoothstep(pc.b.x, pc.b.y, m), 0.0, 0.0, 1.0);\n"
+               "}\n";
+    }
     if (!strcmp(name, "fg_hud.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"

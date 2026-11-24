@@ -20,6 +20,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [Amaral.10, 24/11](2026-11-24-amaral10.md) | Host, APK 48 | A lista de pipelines no APK (1.074) e a leitura dela corrigida; thread de fila (experimental) para a espera de 40% no present; registro cru dos timestamps de GPU. |
 | [Amaral.11, 24/11](2026-11-24-amaral11.md) | Odin + host, APK 49 | Pré-aquecimento confirmado no Odin: draws pulados ~10.000 → 83–397 por sessão. O +47% da thread de fila não vale (geração de quadros ligada e o primeiro bloco era uma transição); o A/B agora descarta o aquecimento e diz se a thread rodou. |
 | [Amaral.12, 24/11](2026-11-24-amaral12.md) | Odin + host, APK 50 | Thread de fila sem ganho (36,36 contra 36,31 fps, p95 pior). O Odin está limitado pela GPU: 27–29 ms por quadro em jogo, com a meta de 60. O "GPU 0,00" vinha de um fim de envio 37,9 s no futuro; a conta agora se recupera. |
+| [Amaral.13, 24/11](2026-11-24-amaral13.md) | Odin + host, APK 51 | A conta da GPU certa desde o início (3 fins descartados). SMAA: 1,06 ms contra 0,4 do FXAA. A máscara do HUD da geração de quadros custava 2,8 ms; agora é feita na metade do tamanho. |
 
 ## Revisões externas e Turnip
 
