@@ -45,7 +45,7 @@ run exec_caches python3 "$ROOT/tools/test_exec_caches.py"
 # writes under /data/local/tmp on a phone: a copy pointed at $OUT here)
 if [ -n "$VKINC" ]; then
     VKI="$(dirname "$(dirname "$VKINC")")"
-    for t in shader_job_queue object_cache shader_meta_cache dyn_vertex_input; do
+    for t in shader_job_queue object_cache shader_meta_cache dyn_vertex_input cbwin_snap; do
         run "$t" bash -c "'$CC' -std=gnu11 -O1 -g $SAN -I '$ROOT/runtime' -I '$ROOT/runtime/nvn' -I '$ROOT/runtime/nvn/vulkan' \
             -I '$VKI' '$ROOT/tools/test_$t.c' -o '$OUT/test_$t' -lpthread -lm && '$OUT/test_$t' | tail -1"
     done
@@ -56,6 +56,9 @@ if [ -n "$VKINC" ]; then
 else
     skip+=("upstream unit tests (Vulkan headers)")
 fi
+run fullscreen_narrow bash -c "python3 '$ROOT/tools/test_fullscreen_narrow.py' | tail -1"
+# (not here: upstream's test_rt_load_upload.c, which includes exec.c and textures.c with its build's own flags - it
+# doesn't build on the host, upstream's tree included)
 run gamebuild_hot bash -c "python3 '$ROOT/tools/test_gamebuild_hot.py' | tail -1"
 run romfs_build bash -c "python3 '$ROOT/tools/test_romfs_build.py' | tail -1"
 

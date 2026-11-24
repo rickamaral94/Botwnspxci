@@ -1893,10 +1893,26 @@ void vk_tex_upload_for_mips(NvnTexture *t) {
 // Called once b->gpu_owned is set so tex_discard leaves guest pages alone; if never uploaded, uses s->upload, and if
 // already sampled (`b->uploaded`) with a subsequent CPU write before becoming gpu_owned, re-uploads in order on s->main.
 bool vk_tex_upload_for_load(NvnTexture *t) {
+    // (Amaral.7, a test for the white, still water and Link's black hair after the 0.4.7 merge: upstream 7077d56
+    // writes a target the CPU backs over the GPU's image before a pass loads it - with a stale CPU copy the image goes
+    // back. LARECOMP_LOAD_UPLOAD=0: not; the first 16 writes are logged with the target's size and format)
+    static int env = -1;
+    if (env < 0) env = !getenv("LARECOMP_LOAD_UPLOAD") || atoi(getenv("LARECOMP_LOAD_UPLOAD")) != 0;
+    if (!env) return false;
     TexBackend *b = tex_backend(t);
     extern uint64_t prof_up_ns;
     uint64_t t0 = prof_up_ns != ~0ull ? SDL_GetTicksNS() : 0;
     bool did = upload_texture_impl(t, b, true);
+    if (did) {
+        static int n;
+        static uint64_t total;
+        total++;
+        if (n < 16 || !(total & (total - 1))) {
+            n++;
+            LOG("[vk] target written from the CPU before its pass loads it (#%llu): %ux%u fmt %#x at %llx\n",
+                (unsigned long long)total, t->width, t->height, t->format, (unsigned long long)t->addr);
+        }
+    }
     if (prof_up_ns != ~0ull) {
         extern uint64_t prof_up_cum;
         uint64_t d = SDL_GetTicksNS() - t0;

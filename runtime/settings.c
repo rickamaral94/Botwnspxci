@@ -83,6 +83,7 @@ Settings g_settings = {
     .pipe_prewarm = -1,         // (vulkan/pipeline_prewarm.inc: automatic - on with Turnip)
     .early_z = false,
     .perf_log = 0,
+    .core_turns = false,        // (an experiment for #401: kernel.c core0_init)
     .sync_lag = true,           // (a few more fps; the CPU's reads of GPU results a frame old: nvn/objects.c nvnSyncWait)
     .out_lines = OUT_AUTO,      // (POCO F7 Ultra, 3200x1440, 1.8.2's Great Plateau: GPU 22.8 ms a frame at the screen's,
                                 // 18.6 at 1080 lines with a larger scene - the final image's passes over 2.2x the pixels)
@@ -235,6 +236,7 @@ void settings_reset_defaults(void) {
     g_settings.motion = d->motion;
     g_settings.motion_source = d->motion_source;
     g_settings.motion_flat = d->motion_flat;
+    g_settings.pad_gyro_axes = d->pad_gyro_axes;
     g_settings.lsfg = d->lsfg;
     g_settings.lsfg_mult = d->lsfg_mult;
     g_settings.lsfg_flow = d->lsfg_flow;
@@ -261,6 +263,7 @@ void settings_reset_defaults(void) {
     g_settings.pipe_prewarm = d->pipe_prewarm;
     g_settings.early_z = d->early_z;
     g_settings.perf_log = d->perf_log;
+    g_settings.core_turns = d->core_turns;
     g_settings.files_in_place = d->files_in_place;
 #endif
 }
@@ -296,6 +299,7 @@ void settings_load(void) {
         else if (!strcmp(key, "motion")) g_settings.motion = atoi(val) != 0;
         else if (!strcmp(key, "motion_source")) g_settings.motion_source = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
         else if (!strcmp(key, "motion_flat")) g_settings.motion_flat = atoi(val) != 0;
+        else if (!strcmp(key, "pad_gyro_axes")) g_settings.pad_gyro_axes = atoi(val) >= 0 && atoi(val) <= 3 ? atoi(val) : 0;
         else if (!strcmp(key, "frame_generation")) g_settings.lsfg = atoi(val) != 0;
         else if (!strcmp(key, "frame_generation_mult")) g_settings.lsfg_mult = atoi(val);
         else if (!strcmp(key, "frame_generation_flow")) g_settings.lsfg_flow = atoi(val);
@@ -326,6 +330,7 @@ void settings_load(void) {
         else if (!strcmp(key, "early_z")) g_settings.early_z = atoi(val) != 0;
         // (early_depth_test, Amaral.5's key, is ignored: it saved its default 1 - Amaral.6's default is off)
         else if (!strcmp(key, "perf_log")) g_settings.perf_log = atoi(val) < 0 || atoi(val) > 2 ? 0 : atoi(val);
+        else if (!strcmp(key, "core_turns")) g_settings.core_turns = atoi(val) != 0;
         else if (!strcmp(key, "files_in_place")) g_settings.files_in_place = atoi(val) != 0;
         else if (!strcmp(key, "gpu_heap")) g_settings.gpu_heap = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "low_ram")) g_settings.low_ram = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
@@ -427,6 +432,7 @@ void settings_save(void) {
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "motion = %d\nmotion_source = %d\nmotion_flat = %d\n", g_settings.motion, g_settings.motion_source,
             g_settings.motion_flat);
+    fprintf(f, "pad_gyro_axes = %d\n", g_settings.pad_gyro_axes);
     fprintf(f, "frame_generation = %d\nframe_generation_mult = %d\nframe_generation_flow = %d\n", g_settings.lsfg,
             g_settings.lsfg_mult, g_settings.lsfg_flow);
 #ifdef __ANDROID__
@@ -451,6 +457,7 @@ void settings_save(void) {
     else fprintf(f, "pipeline_prewarm = %d\n", g_settings.pipe_prewarm ? 1 : 0);
     fprintf(f, "early_z = %d\n", g_settings.early_z ? 1 : 0);
     fprintf(f, "perf_log = %d\n", g_settings.perf_log);
+    fprintf(f, "core_turns = %d\n", g_settings.core_turns ? 1 : 0);
     static const char *const tri[] = {"auto", "0", "1"};  // (-1 / 0 / 1)
 #define TRI(v) tri[(v) < 0 ? 0 : (v) ? 2 : 1]
     fprintf(f, "gpu_heap = %s\ninplace_reads = %s\nturnip_lrz = %s\nlog_file = %d\ngpu_model = %s\n", TRI(g_settings.gpu_heap),
@@ -497,3 +504,8 @@ void settings_save(void) {
     bind_settings_save(f);
     fclose(f);
 }
+
+#ifdef __ANDROID__
+// Settings > "Switch-style core turns" (kernel.c core0_init reads it when the game's threads first take turns)
+bool settings_core_turns(void) { return g_settings.core_turns; }
+#endif

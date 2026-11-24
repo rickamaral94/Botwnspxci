@@ -36,6 +36,7 @@ bool maxwell_no_switch;
 bool maxwell_no_local_struct;
 bool maxwell_native_half;
 bool maxwell_fast_minmax;
+bool maxwell_no_invariant;
 bool maxwell_cb_window;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -3042,7 +3043,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         // depth pre-pass + EQUAL test needs identical positions from different shaders: invariant, and precise so no
         // compiler fuses or reorders the math feeding it (MSL gets this from preserveInvariance; without it foliage
         // drawn twice flickered black)
-        sp(&s, "invariant gl_Position;\nprecise gl_Position;\n");
+        // (LARECOMP_VK_NO_INVARIANT=1, an A/B from the TOTK port / UltraTears 6465cb3 - ~10% of a PC's GPU time in the
+        // world: only invariant left out; precise, which keeps the pre-pass and the EQUAL pass on one position, stays)
+        sp(&s, maxwell_no_invariant ? "precise gl_Position;\n" : "invariant gl_Position;\nprecise gl_Position;\n");
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "layout(location = %d) out vec4 v%d;\n", i, i);
     } else if (stage == STAGE_FRAGMENT) {

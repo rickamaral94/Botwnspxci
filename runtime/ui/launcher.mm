@@ -630,6 +630,7 @@ extern "C" void android_log_file(bool on);
 extern "C" bool vk_adreno_8xx(const char *name);  // (Driver compatibility's Automatic: runtime/nvn/vulkan/device.c)
 extern "C" bool vk_lrz_auto(const char *name);    // (the LRZ's Automatic: the Adreno 8xx and the 740)
 extern "C" bool vk_turnip_heap_on(int setting);
+extern "C" bool vk_turnip_heap_ram_off(void);  // (an Adreno 6xx with 8 GB or less: #520)
 extern "C" bool vk_lrz_at_start(void);
 extern "C" const char *vk_driver_env_at_start(void);
 extern "C" bool vk_heap_file_possible(void);
@@ -637,6 +638,7 @@ extern "C" const char *vk_gpu_name(void);
 extern "C" const char *vk_driver_rejected(void);  // (runtime/nvn/vulkan/android_driver.c)
 extern "C" const char *vk_driver_desc(void);      // (its own name and version: runtime/nvn/vulkan/device.c)
 extern "C" bool vk_driver_is_turnip(void);
+extern "C" bool vk_driver_is_mali(void);
 extern "C" const char *vk_gpu_desc(void);  // ("Adreno (TM) 830 - Turnip")
 static std::string g_log_folder;  // its name ("Download/BOTWRecomp"), "" with none
 static bool g_log_folder_read;
@@ -2046,7 +2048,9 @@ static void prelaunch_tab(float sc) {
                                   "ones on the others."));
         ImGui::Text(tr("This GPU: %s"), vk_gpu_desc());
         if (!vk_driver_is_turnip())
-            ImGui::TextDisabled("%s", tr("These options are for Turnip: the driver in use takes the safer paths anyway."));
+            ImGui::TextDisabled("%s", tr(vk_driver_is_mali()
+                ? "These options are for Turnip: on Mali only draw-target reads in place apply."
+                : "These options are for Turnip: the driver in use takes the safer paths anyway."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Game memory on the GPU (Turnip)"));
         changed |= tri("heap", &g_settings.gpu_heap, vk_turnip_heap_on(-1));  // (any Turnip that places it)
@@ -2055,6 +2059,9 @@ static void prelaunch_tab(float sc) {
                                   "runs at about half the frame rate (15 fps instead of 35 on an Adreno 830). Automatic: on "
                                   "wherever Turnip can map it - without it an Adreno 7xx shows no text. Applies when the "
                                   "game starts."));
+        if (vk_driver_is_turnip() && vk_turnip_heap_ram_off())  // (vulkan/device.c: #520)
+            ImGui::TextDisabled("%s", tr("Automatic is off on this phone: an Adreno 6xx with 8 GB of RAM or less runs out of "
+                                      "GPU memory with it after a few minutes, and the game closes."));
         ImGui::Spacing();
         changed |= ImGui::Checkbox(tr("Game memory through a shared file (experimental)"), &g_settings.heap_file);
         ImGui::TextDisabled("%s", tr("For GPUs where the option above can't work (Mali, Xclipse): the game's memory is shared "
@@ -2064,7 +2071,7 @@ static void prelaunch_tab(float sc) {
         if (!vk_heap_file_possible())
             ImGui::TextDisabled("%s", tr("This driver can't export its memory: the option does nothing here."));
         ImGui::Spacing();
-        ImGui::Text("%s", tr("Draw-target reads in place (Turnip)"));
+        ImGui::Text("%s", tr("Draw-target reads in place"));
         changed |= tri("inplace", &g_settings.inplace_reads, a8);
         ImGui::TextDisabled("%s", tr("On: decals and effects read the image they draw on as it is, the fastest way. Off: a copy "
                                   "of it each time, slower (fewer fps) but by the Vulkan rules. Automatic: on for Adreno 8xx "

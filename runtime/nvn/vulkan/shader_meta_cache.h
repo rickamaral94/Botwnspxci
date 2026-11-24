@@ -48,6 +48,7 @@ enum {
     MW_TF_NO_DISCARD       = 1u << 20,
     MW_TF_NO_STEP_CLAMP    = 1u << 21,
     MW_TF_NO_UNORM_ROUND   = 1u << 22,
+    MW_TF_NO_INVARIANT     = 1u << 23,  // (Amaral.7: LARECOMP_VK_NO_INVARIANT, maxwell_no_invariant)
 };
 
 enum {

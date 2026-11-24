@@ -811,6 +811,10 @@ static void tab_display(void) {
                        "with Turnip. Applies the next time a save loads."))
             g_settings.pipe_prewarm = pi == 0 ? -1 : pi == 1 ? 1 : 0;
     }
+    opt_toggle("Switch-style core turns (experimental)", &g_settings.core_turns, false,
+               "The game's threads that share a CPU core take turns, as on the Switch, on cores 0 to 2 instead of only "
+               "core 0. Try it if the game freezes after a few minutes, mostly in fights with many effects (#401). An "
+               "experiment - report what goes wrong. Applies the next time the game starts.");
     opt_toggle("32-bit shader math", &g_settings.shader_int32, false,
                "Translates the game's shaders with 32-bit address math, the path used for drivers without 64-bit "
                "integers (Adreno 6xx / 7xx and Mali stock drivers). Try it if lighting, grass or text are missing or wrong "
@@ -967,6 +971,12 @@ static void tab_about(void) {
     }
     hint("Auto: a controller's gyroscope once it sends live readings, the phone's otherwise. Phone: always the phone's - "
          "for a controller that says it has a gyroscope but doesn't. Controller: only the controller's.");
+    {
+        static const char *const gyro_axes[] = {"As reported", "Swap left-right and up-down", "Swap up-down and tilt",
+                                                "Swap left-right and tilt"};
+        if (choice("Controller gyro axes", &g_settings.pad_gyro_axes, gyro_axes, 4)) settings_save();  // (hle/motion.c, #511 #521)
+    }
+    hint("If aiming with the controller's gyroscope moves the wrong way (left-right becomes up-down), try another order.");
     if (toggle("Phone motion like the Switch's screen", &g_settings.motion_flat)) settings_save();  // (hle/motion.c, #211 #247)
     hint("Off: the phone moves the aim as a controller would. On: as the Switch's own screen in handheld mode - try it if "
          "tilting the phone turns the aim, and turning it tilts.");

@@ -138,6 +138,8 @@ extern bool maxwell_cb_window;
 // (GLSL) fmin / fmax / saturate as GLSL min / max / clamp: the GPU returns the non-NaN operand and saturates NaN to 0
 // (Adreno, as D3D requires) - what the NaN-testing helpers do. Set by the Android backend.
 extern bool maxwell_fast_minmax;
+// (GLSL vertex) gl_Position without the invariant qualifier, precise kept (LARECOMP_VK_NO_INVARIANT=1; an A/B)
+extern bool maxwell_no_invariant;
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
 extern const uint8_t *maxwell_dbg_code;
