@@ -16,6 +16,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [Amaral.7, 24/11](2026-11-24-amaral7.md) | Host, APK 45 | Upstream 0.4.11 (slots de textura: +20% num Adreno 750; a janela de constant buffers sai do Odin). Chaves para isolar a água branca e o cabelo preto; A/B do `invariant`; avaliação dos outros ports. |
 | [Amaral.8, 24/11](2026-11-24-amaral8.md) | Host, APK 46 | Leitura direta dos alvos no Automático da 740 (as cópias eram 17 de 38,5 ms por quadro); pré-aquecimento pela lista de volta, com a lista distribuída no APK. |
 | [Ports de Switch para Android, 24/11](2026-11-24-ports-android.md) | Avaliação | totk-android (mesmo SoC do Odin), TOTKDroid, Peanuts Native (GPL: só ideias): 12 técnicas por ordem de ganho. |
+| [Amaral.9, 24/11](2026-11-24-amaral9.md) | Host, APK 47 | Fases 0 e 1 do plano da gravação em várias threads: GPU por quadro protegido, símbolos no release; checagem e hash de texturas em threads auxiliares, micro-cortes (do TOTKDroid). |
 
 ## Revisões externas e Turnip
 

@@ -128,7 +128,11 @@ jobs:
           want=$(grep -oP 'Certificado SHA-256: `\K[0-9a-f]{64}' docs/SIGNING-AMARAL.md | head -1)
           echo "certificado: $got (registrado: $want)"
           [ -n "$got" ] && [ "$got" = "$want" ] || { echo "::error::certificado diferente do registrado"; exit 1; }
-          (cd out && sha256sum *.apk > SHA256SUMS && cat SHA256SUMS)
+          # (the runtime's own library with its symbols, for tools/diag_symbolize.py on a performance diagnosis: our code
+          # only, the same build id as the APK's stripped one)
+          sym=android/botwrecompandroid/app/build/intermediates/merged_native_libs/release/mergeReleaseNativeLibs/out/lib/arm64-v8a/libmain.so
+          [ -f "$sym" ] && gzip -9c "$sym" > "out/libmain-symbols-$ver.so.gz"
+          (cd out && sha256sum *.apk *.gz 2>/dev/null > SHA256SUMS && cat SHA256SUMS)
           rm -rf ~/.botwrecompandroid
 
       - name: Pre-release
@@ -136,5 +140,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: |
-          gh release create "$TAG" out/*.apk out/SHA256SUMS --prerelease --target "$GITHUB_SHA" --title "$TAG" \
+          gh release create "$TAG" out/*.apk out/*.gz out/SHA256SUMS --prerelease --target "$GITHUB_SHA" --title "$TAG" \
             --notes "BOTWDroid Amaral $TAG. Nenhum arquivo do jogo incluído: use os seus. Certificado SHA-256 em docs/SIGNING-AMARAL.md; confira com SHA256SUMS."

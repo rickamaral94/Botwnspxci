@@ -801,9 +801,11 @@ static TexBackend *tex_backend(NvnTexture *t) {
 
 static void texture_snapshot_forget(TexBackend *b);
 
+static void tex_check_forget(TexBackend *b);
 void backend_texture_destroyed(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (!b) return;
+    tex_check_forget(b);  // (the "tex check" helper done with it before it goes)
 #ifdef __ANDROID__
     extern void vk_async_drain(void);
     vk_async_drain();  // (the render thread idle: vulkan/async.c)
@@ -900,6 +902,65 @@ static uint64_t hash_full(const uint8_t *p, uint64_t n) {
     return h ^ (h >> 31);
 }
 
+// ---- the whole hash of a large texture, in four parts at once: three helper threads and the caller (TOTKDroid 99735c5:
+// the font's 8 MB glyph cache was ~8% of its render thread, 8.4% -> 3.2% hashing). A read only, so it splits; each part
+// is hash_full of its own bytes, the four folded in order - a change anywhere still changes the result, and the value is
+// the same whether the helpers or the caller alone made it (values are only compared within a run). Under 2 MB: in one
+// piece, as before. LARECOMP_TEX_HASH_THREADS=0: one piece always.
+#include <semaphore.h>
+enum { HASH_PARTS = 4, HASH_PAR_MIN = 2 << 20 };
+static struct { pthread_t th; sem_t go; const uint8_t *p; uint64_t n, h; } hash_job[HASH_PARTS - 1];
+static sem_t hash_done;
+static int hash_par = -1;
+static pthread_mutex_t hash_par_init = PTHREAD_MUTEX_INITIALIZER;
+static void *hash_worker(void *arg) {
+    int i = (int)(intptr_t)arg;
+    for (;;) {
+        sem_wait(&hash_job[i].go);
+        hash_job[i].h = hash_full(hash_job[i].p, hash_job[i].n);
+        sem_post(&hash_done);
+    }
+    return NULL;
+}
+static uint64_t hash_big_alone(const uint8_t *p, uint64_t n) {  // (the same value, the four parts in turn)
+    uint64_t part = (n / HASH_PARTS) & ~63ull, r = hash_full(p, part);
+    for (int i = 1; i < HASH_PARTS; i++) {
+        uint64_t h = hash_full(p + part * i, i == HASH_PARTS - 1 ? n - part * (HASH_PARTS - 1) : part);
+        r = (r ^ h) * 0x9E3779B97F4A7C15ull, r ^= r >> 32;
+    }
+    return r ^ n;
+}
+static uint64_t hash_big(const uint8_t *p, uint64_t n) {
+    if (n < HASH_PAR_MIN) return hash_full(p, n);
+    pthread_mutex_lock(&hash_par_init);
+    if (hash_par < 0) {
+        const char *e = getenv("LARECOMP_TEX_HASH_THREADS");
+        hash_par = !e || atoi(e) != 0;
+        if (hash_par) {
+            sem_init(&hash_done, 0, 0);
+            for (int i = 0; i < HASH_PARTS - 1 && hash_par; i++) {
+                sem_init(&hash_job[i].go, 0, 0);
+                if (pthread_create(&hash_job[i].th, NULL, hash_worker, (void *)(intptr_t)i)) hash_par = 0;
+                else pthread_setname_np(hash_job[i].th, "tex hash");
+            }
+        }
+    }
+    pthread_mutex_unlock(&hash_par_init);
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;  // (the helpers serve one caller at a time; another: alone)
+    if (!hash_par || pthread_mutex_trylock(&mu)) return hash_big_alone(p, n);
+    uint64_t part = (n / HASH_PARTS) & ~63ull;
+    for (int i = 0; i < HASH_PARTS - 1; i++) {
+        hash_job[i].p = p + part * (i + 1);
+        hash_job[i].n = i == HASH_PARTS - 2 ? n - part * (HASH_PARTS - 1) : part;
+        sem_post(&hash_job[i].go);
+    }
+    uint64_t r = hash_full(p, part);
+    for (int i = 0; i < HASH_PARTS - 1; i++) sem_wait(&hash_done);
+    for (int i = 0; i < HASH_PARTS - 1; i++) r = (r ^ hash_job[i].h) * 0x9E3779B97F4A7C15ull, r ^= r >> 32;
+    pthread_mutex_unlock(&mu);
+    return r ^ n;
+}
+
 // (1024 bytes spread over the texture: without page write tracking (Android) every check samples, and 4096 a texture -
 // cache misses mostly - were ~10% of the render thread in the overworld; the periodic full hash stays the safety net)
 static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
@@ -908,6 +969,73 @@ static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
     for (uint64_t i = 0; i < n; i += step) { h ^= p[i]; h *= 1099511628211ull; }
     return h ^ n;
 }
+
+// ---- the sampled checks of textures not seen changing, on a helper thread (TOTKDroid a96f1e5: −0.38 ms a frame, 7 of 7
+// pairs). The render thread queues them and goes on; a sample that differs marks the texture (check_suspect), and its
+// next use checks it on the render thread at once - instead of at its turn, one frame in eight. A change shows up a
+// frame later at most than when the render thread sampled it itself. Destroying a texture waits for the helper to be
+// done with it (tex_check_forget). LARECOMP_TEX_CHECK_THREAD=0: on the render thread, as before;
+// LARECOMP_AB=<frames>:texhelper alternates it.
+enum { TCHECK_N = 1024 };
+static struct { TexBackend *b; const uint8_t *mem; uint64_t size, expect; } tcheck_q[TCHECK_N];
+static unsigned tcheck_head, tcheck_tail;  // (head: next to take; tail: next free - under tcheck_lock)
+static TexBackend *tcheck_cur;             // (the one the helper samples now)
+static pthread_mutex_t tcheck_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t tcheck_more = PTHREAD_COND_INITIALIZER, tcheck_idle = PTHREAD_COND_INITIALIZER;
+static int tcheck_started;
+static uint64_t tcheck_jobs, tcheck_hits;
+static void *tcheck_main(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&tcheck_lock);
+    for (;;) {
+        while (tcheck_head == tcheck_tail) pthread_cond_wait(&tcheck_more, &tcheck_lock);
+        unsigned i = tcheck_head++ % TCHECK_N;
+        TexBackend *b = tcheck_q[i].b;
+        if (!b) continue;  // (forgotten: tex_check_forget)
+        const uint8_t *mem = tcheck_q[i].mem;
+        uint64_t size = tcheck_q[i].size, expect = tcheck_q[i].expect;
+        tcheck_cur = b;
+        pthread_mutex_unlock(&tcheck_lock);
+        bool differs = fnv_sample(mem, size) != expect;
+        pthread_mutex_lock(&tcheck_lock);
+        if (differs) __atomic_store_n(&b->check_suspect, 1, __ATOMIC_RELEASE), tcheck_hits++;
+        tcheck_cur = NULL;
+        pthread_cond_broadcast(&tcheck_idle);
+    }
+    return NULL;
+}
+static bool tex_check_thread_on(void) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_TEX_CHECK_THREAD") || atoi(getenv("LARECOMP_TEX_CHECK_THREAD"));
+    extern int vk_ab(const char *what);
+    int ab = vk_ab("texhelper");
+    return ab >= 0 ? ab == 1 : on;
+}
+static bool tex_check_queue(TexBackend *b, const uint8_t *mem, uint64_t size, uint64_t expect) {  // false: full queue
+    pthread_mutex_lock(&tcheck_lock);
+    if (!tcheck_started) {
+        pthread_t th;
+        tcheck_started = pthread_create(&th, NULL, tcheck_main, NULL) == 0 ? 1 : -1;
+        if (tcheck_started > 0) pthread_setname_np(th, "tex check"), pthread_detach(th);
+    }
+    bool ok = tcheck_started > 0 && tcheck_tail - tcheck_head < TCHECK_N;
+    if (ok) {
+        tcheck_q[tcheck_tail++ % TCHECK_N] = (typeof(tcheck_q[0])){b, mem, size, expect};
+        tcheck_jobs++;
+        pthread_cond_signal(&tcheck_more);
+    }
+    pthread_mutex_unlock(&tcheck_lock);
+    return ok;
+}
+static void tex_check_forget(TexBackend *b) {  // (before b is freed)
+    if (!tcheck_started) return;
+    pthread_mutex_lock(&tcheck_lock);
+    for (unsigned i = tcheck_head; i != tcheck_tail; i++)
+        if (tcheck_q[i % TCHECK_N].b == b) tcheck_q[i % TCHECK_N].b = NULL;
+    while (tcheck_cur == b) pthread_cond_wait(&tcheck_idle, &tcheck_lock);
+    pthread_mutex_unlock(&tcheck_lock);
+}
+void vk_tex_check_stats(uint64_t *jobs, uint64_t *hits) { *jobs = tcheck_jobs, *hits = tcheck_hits; }
 
 static pthread_mutex_t pending_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1048,7 +1176,11 @@ static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) 
     // linear textures, and page tracking makes most checks free. LARECOMP_LIN_STAGGER=1: every 8th frame, as before.
     static int lin_every = -1;
     if (lin_every < 0) lin_every = !getenv("LARECOMP_LIN_STAGGER");
-    if (!for_rt_load && b->uploaded && !b->dynamic && !(lin_every && (t->flags & 0x50)) && ((frame + ((uintptr_t)b >> 6)) & 7)) return false;
+    if (!for_rt_load && b->uploaded && !b->dynamic && !(lin_every && (t->flags & 0x50)) && ((frame + ((uintptr_t)b >> 6)) & 7) &&
+        !__atomic_load_n(&b->check_suspect, __ATOMIC_ACQUIRE))
+        return false;
+    // (the helper's sample differed: checked here and now, the mark taken)
+    bool suspect = __atomic_load_n(&b->check_suspect, __ATOMIC_ACQUIRE) && __atomic_exchange_n(&b->check_suspect, 0, __ATOMIC_ACQ_REL);
     const FormatInfo *fi = t->layout.fmt;
     if (!fi || !fi->bpb) return false;
     VkFmt mf = fmt_of(t->format);
@@ -1106,11 +1238,15 @@ static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) 
     if (!for_rt_load && b->uploaded && b->dynamic && !always_full && !restyle && !periodic && texture_unchanged(b, mem, total)) return false;
     if (!full && !restyle) {
         prof_tex_samples++;
+        // (a texture not seen changing: its sample on the helper thread, unless that already found it differing)
+        if (!for_rt_load && !suspect && b->uploaded && !b->dynamic && tex_check_thread_on() &&
+            tex_check_queue(b, mem, total, b->sample_hash))
+            return false;
         uint64_t sh = fnv_sample(mem, total);
         if (sh == b->sample_hash) return false;
     }
     prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
-    uint64_t h = hash_full(mem, total), last_full = b->full_frame, old_sample = b->sample_hash;
+    uint64_t h = hash_big(mem, total), last_full = b->full_frame, old_sample = b->sample_hash;
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
     if (b->discarded && h == b->disc_hash && !restyle) {
@@ -1345,7 +1481,7 @@ static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) 
             b->discarded = hi - lo;
             tex_discarded_bytes += b->discarded;
             if (zero) {
-                b->disc_hash = hash_full(mem, total);
+                b->disc_hash = hash_big(mem, total);
                 b->sample_hash = fnv_sample(mem, total);
             } else
                 b->disc_hash = h;  // (the contents stay: reading them now would only bring the pages straight back)
@@ -2032,6 +2168,10 @@ bool vk_any_format_no_linear(void) {
 // garbage: the grass stretched and black (#307 Immortalis-G715, #258 G68; #244, Propinbo). Those take the sampler's
 // nearest twin instead (exec.c). LARECOMP_NO_FILTER_FALLBACK=1: as before.
 bool vk_format_filters_linear(VkFormat f) {
+    // (asked for every texture a draw binds: the core formats, < 256, answered from a table - the list's search was 1%
+    // of TOTKDroid's render thread, 2bce81c; an entry is written once, the same value by any thread)
+    static int8_t direct[256];  // 0 not asked yet, 1 filters, -1 doesn't
+    if ((unsigned)f < 256 && __atomic_load_n(&direct[f], __ATOMIC_RELAXED)) return __atomic_load_n(&direct[f], __ATOMIC_RELAXED) > 0;
     static struct { VkFormat f; bool ok; } cache[64];
     static int n;
     for (int i = 0; i < n; i++) if (cache[i].f == f) return cache[i].ok;
@@ -2040,7 +2180,8 @@ bool vk_format_filters_linear(VkFormat f) {
         if (!vk_format_is_int(f)) atomic_fetch_or_explicit(&g_any_no_linear, 3, memory_order_relaxed);
         LOG("[vk] format %d can't be filtered linearly on this GPU: its textures sampled nearest\n", f);
     }
-    if (n < 64) cache[n].f = f, cache[n].ok = ok, n++;
+    if ((unsigned)f < 256) __atomic_store_n(&direct[f], (int8_t)(ok ? 1 : -1), __ATOMIC_RELAXED);
+    else if (n < 64) cache[n].f = f, cache[n].ok = ok, n++;
     return ok;
 }
 

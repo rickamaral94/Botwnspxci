@@ -142,6 +142,8 @@ typedef struct TexBackend {
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
+    uint8_t check_suspect;  // (textures.c, the "tex check" helper: its sample differed - checked on the render thread at
+                            // the next use; __atomic builtins)
 } TexBackend;
 // (exec.c) the presented image in two steps, for a target that isn't the window image (vulkan/framegen.c)
 VkImageView vk_present_source(VkCommandBuffer cb, TexBackend *b, float vw, float vh, const float pv[8]);

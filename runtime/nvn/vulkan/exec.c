@@ -407,6 +407,8 @@ static void note_gmem_store(int stage);  // (below: it reads the bound storage b
 // own slowness is the pacer's business (vk_pace_frame: busy time per presented frame). LARECOMP_COUNTER_IDLE=1: as
 // before.
 #define CQ_QUERIES (CQ_MAX + 2)
+static uint64_t gpu_ts_bogus;  // (cq_resolve: ends further ahead than the host's time allows, left out)
+uint64_t vk_gpu_ts_bogus(void) { return gpu_ts_bogus; }
 static uint64_t gpu_ts_dropped, gpu_ts_ok, gpu_ts_unread, gpu_ts_covered, gpu_ts_backwards, gpu_ts_ns_lost;  // (diag.c: how much of it was read)
 static _Atomic uint64_t gpu_busy_total;  // (GPU ns working, all submissions so far: ADPF's GPU time per frame)
 static double g_pace_gpu_ms;  // (the last presented frame's GPU busy time: LARECOMP_LOG_PACE)
@@ -802,6 +804,24 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
                 }
                 prev_present = q->presentation;
             }
+            // (Amaral.9, Phase 0 of docs/PLANO-GRAVACAO-MULTITHREAD: since 0.4.7's fence per submission the Odin's
+            // "GPU per real frame" read 0.00 for 20 s, then 51-120 ms - more than the frame. One end far ahead of the
+            // others holds last_end there, and every submission after reads as covered by it. An end can't be further
+            // ahead of the last one than the host's own time since: such a pair is left out, and the first 8 logged.
+            // LARECOMP_GPU_TS_GUARD=0: as before.)
+            static int guard = -1;
+            static int64_t last_end_host;
+            static int nbogus;
+            if (guard < 0) guard = !getenv("LARECOMP_GPU_TS_GUARD") || atoi(getenv("LARECOMP_GPU_TS_GUARD"));
+            int64_t host_now = (int64_t)plat_now_ns();
+            if (guard && last_end >= 0 && s1 > last_end && s1 - last_end > host_now - last_end_host + 100000000) {
+                gpu_ts_bogus++;
+                if (nbogus++ < 8)
+                    LOG("[gpu-ts] submission %llu: its end %.1f ms past the last one's, %.1f ms of host time since - left "
+                        "out (start-end %.1f ms)\n", (unsigned long long)q->seq, (s1 - last_end) / 1e6,
+                        (host_now - last_end_host) / 1e6, (s1 - s0) / 1e6);
+                goto ts_done;
+            }
             if (s1 > s0) {
                 uint64_t ns = (uint64_t)(s1 - (s0 > last_end ? s0 : last_end > s1 ? s1 : last_end));
                 gpu_busy_total += ns;
@@ -809,7 +829,8 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
                 if (ns) gpu_ts_ok++;
                 else gpu_ts_covered++, gpu_ts_ns_lost += (uint64_t)(s1 - s0);  // (inside an earlier one's span)
             } else gpu_ts_backwards++;
-            if (s1 > last_end) last_end = s1;
+            if (s1 > last_end) last_end = s1, last_end_host = host_now;
+        ts_done:;
         } else gpu_ts_unread++, vk_timing_trace_query_failure(result, 0, q->seq);
     }
 #endif
@@ -4538,9 +4559,17 @@ static bool snap_ok[8];
 static bool snap_fb_dirty[8];
 static const char *snap_why[8];
 static const char *snap_reason = "?";
+// (some snap_ok set: the invalidations each draw makes for its targets look no further without one - TOTKDroid
+// 2bce81c, ~1.4% of its render thread)
+static bool snap_any;
 static void snapshots_invalidate(NvnTexture *t) {
-    for (int i = 0; i < 8; i++)
+    if (!snap_any) return;
+    bool any = false;
+    for (int i = 0; i < 8; i++) {
         if ((!t || snap_tex[i] == t) && snap_ok[i]) { snap_ok[i] = false; snap_fb_dirty[i] = false; snap_why[i] = snap_reason; }
+        any |= snap_ok[i];
+    }
+    snap_any = any;
 }
 static void snapshots_invalidate_for(NvnTexture *t, const char *why) {
     snap_reason = why;
@@ -5005,7 +5034,7 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
                     if (si < 0 || !snap_ok[si]) {
                         if (in_pass && !st.rt_dirty && (pass_written & bit)) st.rt_dirty = true, stat_inplace_breaks++, prof_dirty[0]++;
                         if (si < 0) { static int rr; si = rr++ & 7; snap_tex[si] = t; }
-                        snap_ok[si] = true;
+                        snap_ok[si] = true, snap_any = true;
                         snap_fb_dirty[si] = false;
                     }
                     if (ninplace < 4) inplace_tex[ninplace++] = t;
@@ -5072,7 +5101,7 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
             feedback_snap[nfeedback] = dst;
             feedback_view[nfeedback++] = vk_image_view(dst, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
             if (si < 0) { static int rr; si = rr++ & 7; snap_tex[si] = t; }
-            snap_ok[si] = true;
+            snap_ok[si] = true, snap_any = true;
             snap_fb_dirty[si] = false;
             if (in_pass && !st.rt_dirty) prof_dirty[1]++;
             st.rt_dirty = true;

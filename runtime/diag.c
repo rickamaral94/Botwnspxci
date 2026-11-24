@@ -840,6 +840,18 @@ static void *report_main(void *arg) {
             "not ready, %llu end before start, %llu never read",
             (unsigned long long)(h[0] - g_ts0[0]), (unsigned long long)(h[2] - g_ts0[2]), (h[3] - g_ts0[3]) / 1e6,
             (unsigned long long)(h[1] - g_ts0[1]), (unsigned long long)(h[4] - g_ts0[4]), (unsigned long long)(h[5] - g_ts0[5]));
+#ifndef DIAG_TESTING
+        {   // (vulkan/exec.c cq_resolve: the ends left out as further ahead than the host's time allows - Amaral.9;
+            // since the start of the run, and the texture checks the "tex check" helper took - jobs, found differing)
+            extern uint64_t vk_gpu_ts_bogus(void);
+            extern void vk_tex_check_stats(uint64_t *jobs, uint64_t *hits);
+            uint64_t j, hh;
+            vk_tex_check_stats(&j, &hh);
+            out("GPU timestamps left out as ahead of the host's time (since the start): %llu; texture checks on the helper "
+                "thread: %llu, %llu found differing", (unsigned long long)vk_gpu_ts_bogus(), (unsigned long long)j,
+                (unsigned long long)hh);
+        }
+#endif
     }
 #endif
     stat_line("final composition (the game image into the window + the menus / overlay)", f_comp, f_ncomp, NULL, 0, 0);

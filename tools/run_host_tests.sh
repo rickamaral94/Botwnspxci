@@ -40,6 +40,7 @@ else
 fi
 
 run exec_caches python3 "$ROOT/tools/test_exec_caches.py"
+run tex_hash python3 "$ROOT/tools/test_tex_hash.py"
 
 # (upstream 0.4.7's: job queue, object cache, .smeta cache, dynamic vertex input, pipeline prewarm - the last one
 # writes under /data/local/tmp on a phone: a copy pointed at $OUT here)
