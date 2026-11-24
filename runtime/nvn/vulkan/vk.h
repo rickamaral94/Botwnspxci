@@ -105,6 +105,8 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 typedef struct { VkBuffer buf; uint64_t off; void *ptr; } VkSpan;
 VkSpan vk_transient(uint64_t size, uint64_t align);
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align);
+VkSpan vk_transient_tex(uint64_t size, uint64_t align);  // (the same, counted as texture uploads: exec.c up_src)
+VkSpan vk_transient_copy_tex(const void *data, uint64_t size, uint64_t align);
 VkSpan vk_readback(uint64_t size);  // host-cached GPU -> CPU staging (read right after the copy completes)
 void vk_readback_ready(uint64_t size);  // after the copy's submission is done, before the CPU reads it
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout);

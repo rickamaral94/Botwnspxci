@@ -80,6 +80,26 @@ static uint64_t prof_dsw, prof_cbuf, prof_set_hits, prof_set_miss;  // (sets: dr
 static uint64_t prof_exec, prof_draw, prof_sets, prof_vtx, prof_submit, prof_pre, prof_key, prof_dyn, prof_tex, prof_up, prof_gpu;
 static VkQueryPool prof_qp;
 static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
+// ---- (Amaral.15) per-frame telemetry: never-reset totals that diag.c reads at every real frame (its frame table and
+// CSV). The transient ring's bytes by who asked for them - up_src, set around the call sites (render thread only, like
+// the ring): game constant buffers copied from its memory, vertex and index data, global memory (the copy mode: no heap
+// import), constant-buffer window bases, texture uploads, the rest (driver constants, tables, patched copies, post).
+enum { UP_CB, UP_VTX, UP_IDX, UP_GMEM, UP_CBWIN, UP_TEX, UP_OTHER, UP_N };
+static int up_src = UP_OTHER;
+static uint64_t cum_up[UP_N];
+static uint64_t cum_passes, cum_flushes, cum_dispatches, cum_pipe_binds, cum_set_binds, cum_set_offs, cum_breaks,
+    cum_fbcopies, cum_submit_ns, cum_gcopy_reused;
+// c[]: draws, passes, flushes (submissions), dispatches, pipeline binds, descriptor set binds, of those only dynamic
+// offsets, in-place pass breaks, feedback copies, GPU waits ns, vkQueueSubmit2 ns, guest-copy bytes reused, then UP_N
+// ring byte counts (diag.c RC_*)
+int diag_frame_counters(uint64_t *c, int n) {
+    uint64_t v[12 + UP_N] = {cum_draws, cum_passes, cum_flushes, cum_dispatches, cum_pipe_binds, cum_set_binds, cum_set_offs,
+                             cum_breaks, cum_fbcopies, cum_wait, cum_submit_ns, cum_gcopy_reused};
+    for (int i = 0; i < UP_N; i++) v[12 + i] = cum_up[i];
+    int m = n < (int)(sizeof v / sizeof v[0]) ? n : (int)(sizeof v / sizeof v[0]);
+    for (int i = 0; i < m; i++) c[i] = v[i];
+    return m;
+}
 #ifdef __ANDROID__
 uint64_t vk_cum_wait_ns(void) { return cum_wait; }  // (the performance overlay: time spent waiting on the GPU)
 #endif
@@ -1467,11 +1487,13 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         WdMark wd_mark = vk_wd_enter(WD_R_SUBMIT, submit_seq + 1);  // (freeze watchdog; seq_fence_for may wait inside it)
 #endif
         VkFence sfence = seq_fence_for(submit_seq + 1);  // (the waiter thread's)
+        uint64_t sub_t0 = SDL_GetTicksNS();
 #ifdef __ANDROID__
         VkResult sr = qt_active ? qt_submit(&si, sfence, submit_seq + 1) : vkQueueSubmit2(g_vk.queue, 1, &si, sfence);
 #else
         VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, sfence);
 #endif
+        cum_submit_ns += SDL_GetTicksNS() - sub_t0;
 #ifdef __ANDROID__
         vk_wd_leave(wd_mark);
         tl_add((int64_t)plat_now_ns(), wait || signal ? "render: submitted (present)" : "render: submitted", submit_seq + 1, 0);
@@ -1495,7 +1517,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         if (log) LOG("[syncseq] t %.2f submitted seq %llu%s\n", SDL_GetTicksNS() / 1e6, (unsigned long long)submit_seq, signal ? " (present)" : "");
     }
     cur_sub = (cur_sub + 1) % SUBS;
-    stat_flushes++;
+    stat_flushes++, cum_flushes++;
     cum_submits++;
     ring_retire();
     vk_collect_dead();
@@ -1656,6 +1678,7 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
             c->used = off + size;
             c->seq = pending;
             stat_upload_bytes += size;
+            cum_up[up_src] += size;
             return (VkSpan){c->buf, off, c->ptr + off};
         }
     }
@@ -1682,6 +1705,7 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
     chunks[pick].seq = pending;
     chunks[pick].frame = now;
     stat_upload_bytes += size;
+    cum_up[up_src] += size;
     return (VkSpan){chunks[pick].buf, 0, chunks[pick].ptr};
 }
 
@@ -1718,6 +1742,23 @@ VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {
     if (size) memcpy(s.ptr, data, size);
     return s;
 }
+// (the same, its bytes counted for src: the per-frame telemetry's sources)
+static VkSpan transient_src(int src, uint64_t size, uint64_t align) {
+    int o = up_src;
+    up_src = src;
+    VkSpan s = vk_transient(size, align);
+    up_src = o;
+    return s;
+}
+static VkSpan transient_copy_src(int src, const void *data, uint64_t size, uint64_t align) {
+    int o = up_src;
+    up_src = src;
+    VkSpan s = vk_transient_copy(data, size, align);
+    up_src = o;
+    return s;
+}
+VkSpan vk_transient_tex(uint64_t size, uint64_t align) { return transient_src(UP_TEX, size, align); }  // (textures.c)
+VkSpan vk_transient_copy_tex(const void *data, uint64_t size, uint64_t align) { return transient_copy_src(UP_TEX, data, size, align); }
 
 // Per-draw constants that usually repeat the previous draw's (scale table, tint, driver constants): reuse that copy
 // while it's identical, within one submission. slot: one per kind of data.
@@ -1797,7 +1838,7 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size, bool vertex) {
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
     if (gcopy[slot].seq == seq && gcopy[slot].addr == addr) {
         if (gcopy[slot].size == size || (gcopy_range_mode && gcopy[slot].size > size)) {
-            gcopy_reused += size;
+            gcopy_reused += size, cum_gcopy_reused += size;
             return gcopy[slot].span;
         }
         if (gcopy_range_mode && vertex && size > gcopy[slot].size && size <= gcopy[slot].capacity) {
@@ -1823,7 +1864,7 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size, bool vertex) {
         capacity = 16;
         while (capacity < size) capacity <<= 1;
     }
-    VkSpan s = vk_transient(capacity ? capacity : 16, 256);
+    VkSpan s = transient_src(vertex ? UP_VTX : UP_CB, capacity ? capacity : 16, 256);
     if (size) memcpy(s.ptr, (const void *)(uintptr_t)addr, size);
     stat_cb_copied += size;
     gcopy_copied += size;
@@ -3200,7 +3241,7 @@ static void begin_pass(void) {
     in_pass = true;
     pass_written = 0;
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
-    stat_passes++;
+    stat_passes++, cum_passes++;
 }
 
 static void pass_size(int *w, int *h) {
@@ -5245,7 +5286,7 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
                     int si = -1;
                     for (int k = 0; k < 8; k++) if (snap_tex[k] == t) si = k;
                     if (si < 0 || !snap_ok[si]) {
-                        if (in_pass && !st.rt_dirty && (pass_written & bit)) st.rt_dirty = true, stat_inplace_breaks++, prof_dirty[0]++;
+                        if (in_pass && !st.rt_dirty && (pass_written & bit)) st.rt_dirty = true, stat_inplace_breaks++, cum_breaks++, prof_dirty[0]++;
                         if (si < 0) { static int rr; si = rr++ & 7; snap_tex[si] = t; }
                         snap_ok[si] = true, snap_any = true;
                         snap_fb_dirty[si] = false;
@@ -5288,7 +5329,7 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
                 feedback_view[nfeedback++] = vk_image_view(&existing->copy, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
                 continue;
             }
-            stat_feedback_copies++;
+            stat_feedback_copies++, cum_fbcopies++;
             if (ct_on()) LOG("[ct] snapshot %p %ux%u (was %s, si %d)\n", (void *)t, src->width, src->height, si >= 0 ? snap_why[si] : "new", si);
             vk_end_pass();
             TexBackend *dst = snapshot_image(t, src);
@@ -6112,7 +6153,7 @@ static VkSpan cbwin_base_copy(uint64_t addr, uint64_t size, uint64_t win_lo, uin
     uint64_t seq = cbwin_seq_key(gen);
     VkSpan s;
     if (can_cache && cbwin_base_lookup(&g_cbwin_cache, seq, addr, size, win_lo, win_hi, &s)) return s;
-    s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
+    s = transient_copy_src(UP_CBWIN, (const void *)(uintptr_t)addr, size, 256);
     stat_cb_copied += size;
     if (cbwin_read_end_ok(gen, can_cache))
         cbwin_base_insert(&g_cbwin_cache, seq, addr, size, win_lo, win_hi, s);
@@ -6805,7 +6846,7 @@ static void gres_sync(GaRes *e) {
         uint64_t s0 = b;
         while (b < len && memcmp(g + b, e->shadow + b, 256)) b += 256;
         uint64_t n = b - s0;
-        VkSpan sp = vk_transient(n, 256);
+        VkSpan sp = transient_src(UP_GMEM, n, 256);
         memcpy(sp.ptr, g + s0, n);
         memcpy(e->shadow + s0, g + s0, n);
         for (uint64_t k = s0 / 256; k < (s0 + n + 255) / 256; k++) e->bseq[k] = pend;
@@ -7253,7 +7294,7 @@ static bool gsnap_prepare(void) {
     }
     for (int i = 0; i < m; i++) total += r[i].hi - r[i].lo;
     if (!m || m > GMAP_MAX || total > (64u << 10)) return false;
-    gc_span = vk_transient(total, 256);
+    gc_span = transient_src(UP_GMEM, total, 256);
     uint64_t off = 0;
     for (int i = 0; i < m; i++) {
         uint64_t len = r[i].hi - r[i].lo;
@@ -7368,7 +7409,7 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
     memset(gmap_tab, 0, sizeof gmap_tab);
     gc_size = 0;
     if (!m || total > (64ull << 20)) return;  // (too much: those loads read zero, as without this)
-    gc_span = vk_transient(total, 256);
+    gc_span = transient_src(UP_GMEM, total, 256);
     gc_size = total;
     uint64_t off = 0, seq = vk_pending_seq();
     pthread_mutex_lock(&gc_lock);
@@ -7640,7 +7681,7 @@ void vc_flush(void) {
         else if (nc) {  // (copy mode: no heap buffer - the written pages go through the upload ring)
             uint64_t tot = 0, o = 0;
             for (int k = 0; k < nc; k++) tot += cp[k].size;
-            VkSpan sp = vk_transient(tot, 256);
+            VkSpan sp = transient_src(UP_VTX, tot, 256);
             for (int k = 0; k < nc; k++) {
                 memcpy((uint8_t *)sp.ptr + o, (const void *)(uintptr_t)(HEAP_BASE + cp[k].srcOffset), cp[k].size);
                 cp[k].srcOffset = sp.off + o;
@@ -8320,7 +8361,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
 #endif
     }
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5), note_gmem_store(5);
-    stat_dispatches++;
+    stat_dispatches++, cum_dispatches++;
 #ifdef __ANDROID__
     dchain = !gfast_n && vk_cmd() == cb && dchain_ok();
 #endif
@@ -9459,7 +9500,7 @@ static void draw_(CmdRec *r, bool indexed) {
         return;
     }
     ss_enabled();
-    if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; stat_pipe_binds++; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
+    if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; stat_pipe_binds++, cum_pipe_binds++; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
 #ifdef __ANDROID__
     if (g_vk.dyn_vi && ss_need(SS_VI, ss.vi_gen == vi_gen && ss.vi_mask == pr->vi->attr_mask)) {
         ss.vi_gen = vi_gen;
@@ -9633,12 +9674,12 @@ static void draw_(CmdRec *r, bool indexed) {
         // another place in the transient ring - costs Turnip as much as new sets: a reserved set copied, every bindless
         // base written again and all 8 sets' descriptor cache dropped. How many of the binds are those)
         if (ss_on && (ss.known & SS_SETS) && ss.layout == pr->layout && ss.sets[0] == vset && ss.sets[1] == fset)
-            stat_set_binds_offs++;
+            stat_set_binds_offs++, cum_set_offs++;
         ss.layout = pr->layout, ss.sets[0] = vset, ss.sets[1] = fset;
         ss.ndyn = nd;
         memcpy(ss.dyn, dyn, nd * sizeof dyn[0]);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, nd, dyn);
-        stat_set_binds++;
+        stat_set_binds++, cum_set_binds++;
     }
     if (pr->vi->uses_gmem_store) vc_mark_sbufs(0), note_gmem_store(0);
     if (pr->fi->uses_gmem_store) vc_mark_sbufs(1), note_gmem_store(1);
@@ -9658,7 +9699,7 @@ static void draw_(CmdRec *r, bool indexed) {
         max_index = first + count;
         if (!native) {
             uint32_t *e = expand_indices(mode, count, NULL, 0, first, &icount);
-            ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
+            ib = transient_copy_src(UP_IDX, e, (uint64_t)icount * 4 + 4, 4);
             free(e);
         }
     } else {
@@ -9676,7 +9717,7 @@ static void draw_(CmdRec *r, bool indexed) {
             if (iaddr % isz == 0 && guest_direct(iaddr, (uint64_t)count * isz, &ib.buf, &ib.off)) {
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
-                ib = vk_transient_copy(src, (uint64_t)count * isz + 4, 4);
+                ib = transient_copy_src(UP_IDX, src, (uint64_t)count * isz + 4, 4);
 #ifdef __ANDROID__
                 // (no primitive restart - most draws: a plain maximum, which the compiler vectorizes; the scalar
                 // loop with the restart test was ~9% of the render thread in the copy mode, every indexed draw)
@@ -9691,7 +9732,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 else { const uint32_t *s = src; for (uint32_t i = 0; i < count; i++) if (s[i] > max_index && s[i] != restart) max_index = s[i]; }
             }
         } else if (native) {  // 8-bit indices: widen to 16
-            ib = vk_transient((uint64_t)count * 2 + 4, 4);
+            ib = transient_src(UP_IDX, (uint64_t)count * 2 + 4, 4);
             uint16_t *w = ib.ptr;
             const uint8_t *s = src;
             for (uint32_t i = 0; i < count; i++) { w[i] = s[i] == 0xFF && st.prim_restart ? 0xFFFF : s[i]; if (s[i] > max_index && w[i] != 0xFFFF) max_index = s[i]; }
@@ -9700,7 +9741,7 @@ static void draw_(CmdRec *r, bool indexed) {
         } else {
             uint32_t *e = expand_indices(mode, count, src, (int)itype, 0, &icount);
             for (uint32_t i = 0; i < icount; i++) if (e[i] > max_index) max_index = e[i];
-            ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
+            ib = transient_copy_src(UP_IDX, e, (uint64_t)icount * 4 + 4, 4);
             free(e);
         }
         if (!scan_src) {
@@ -9735,7 +9776,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 reach = vi_divisors[s] ? ((uint64_t)base_inst + inst + vi_divisors[s] - 1) / vi_divisors[s] * vi_strides[s]
                                      : ((uint64_t)first + count) * vi_strides[s];
             if (v.addr && v.size && reach > v.size && reach <= (1u << 20)) {
-                sp = vk_transient(reach, 16);
+                sp = transient_src(UP_VTX, reach, 16);
                 memcpy(sp.ptr, (const void *)(uintptr_t)v.addr, v.size);
                 memset((uint8_t *)sp.ptr + v.size, 0, reach - v.size);
                 VkDeviceSize zoff = sp.off;

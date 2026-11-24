@@ -18,7 +18,15 @@ uint64_t diag_gpu_busy_total_ns(void) { return 0; }
 bool diag_in_gameplay(void) { return true; }
 bool diag_sampler_allowed(void) { return true; }
 const char *diag_function_name(uint64_t pc, uint64_t *offset) { (void)pc, (void)offset; return NULL; }
-const char *diag_report_path(void) { return NULL; }
+static const char *g_rpath;  // (test_real_frames: a report file and its CSV)
+const char *diag_report_path(void) { return g_rpath; }
+// (the runtime's counters: test_real_frames drives them)
+static uint64_t g_ctr[19];
+int diag_frame_counters(uint64_t *c, int n) {
+    int m = n < 19 ? n : 19;
+    memcpy(c, g_ctr, sizeof(uint64_t) * (size_t)m);
+    return m;
+}
 
 static uint64_t fake_ns;
 static uint64_t fake_now(void) { return fake_ns; }
@@ -145,12 +153,81 @@ static void test_ab(void) {
     diag_test_set_clock(NULL);
 }
 
+// The real-frame table: 30 fps with every 20th frame slow (66 ms, more draws and passes, a bigger upload); its report
+// lines and its CSV beside the report - one row a real frame, the counters as differences per frame
+static void test_real_frames(void) {
+    char dir[] = "/tmp/diag_rf_XXXXXX";
+    if (!mkdtemp(dir)) { CHECK(0); return; }
+    char rp[256];
+    snprintf(rp, sizeof rp, "%s/perf-diag.txt", dir);
+    g_rpath = rp;
+    memset(g_ctr, 0, sizeof g_ctr);
+    diag_test_set_clock(fake_now);
+    fake_ns = 300000000000ull;
+    diag_request(4);
+    for (int f = 0; f < 400; f++) {
+        bool slow = f % 20 == 19;
+        fake_ns += slow ? 66666667 : 33333333;
+        g_ctr[0] += slow ? 9000 : 5000;       // draws
+        g_ctr[1] += slow ? 300 : 178;         // passes
+        g_ctr[12] += 15u << 20;               // constant buffers copied, 15 MB
+        diag_real_frame();
+        diag_present(100000, 200000);
+    }
+    struct timespec ts = {1, 0};
+    nanosleep(&ts, NULL);
+    CHECK(diag_status(NULL, 0) == 3);
+    // the CSV: its header, rows of 5000 draws and of 9000
+    char cmd[512];
+    snprintf(cmd, sizeof cmd, "ls %s/*-frames.csv 2>/dev/null | head -1", dir);
+    FILE *ls = popen(cmd, "r");
+    char csv[300] = "";
+    if (ls) { if (!fgets(csv, sizeof csv, ls)) csv[0] = 0; pclose(ls); }
+    csv[strcspn(csv, "\n")] = 0;
+    FILE *f = csv[0] ? fopen(csv, "r") : NULL;
+    CHECK(f != NULL);
+    int rows = 0, fast = 0, slowr = 0;
+    if (f) {
+        char line[1024];
+        CHECK(fgets(line, sizeof line, f) && strstr(line, "frame_us") && strstr(line, "up_cb_kb"));
+        while (fgets(line, sizeof line, f)) {
+            unsigned fr, g, a, w, dt, rc, mc, gp, dr, ps;
+            if (sscanf(line, "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u", &fr, &g, &a, &w, &dt, &rc, &mc, &gp, &dr, &ps) == 10) {
+                rows++;
+                if (dr == 5000 && dt > 33000 && dt < 34000) fast++;
+                if (dr == 9000 && ps == 300 && dt > 66000 && dt < 67000) slowr++;
+            }
+        }
+        fclose(f);
+    }
+    CHECK(rows > 100 && fast > 90 && slowr > 4);
+    // the report: the table's lines, the slowest 5% with the bigger draw count
+    f = fopen(rp, "r");
+    CHECK(f != NULL);
+    bool head = false, slowline = false;
+    if (f) {
+        char line[1024];
+        while (fgets(line, sizeof line, f)) {
+            if (strstr(line, "-- real frames")) head = true;
+            double a, m, sl;
+            if (sscanf(line, " draws %lf %lf %lf", &a, &m, &sl) == 3) slowline = m > 4999 && m < 5001 && sl > 8999 && sl < 9001;
+        }
+        fclose(f);
+    }
+    CHECK(head && slowline);
+    g_rpath = NULL;
+    diag_test_set_clock(NULL);
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    if (system(cmd)) {}
+}
+
 int main(void) {
     test_percentiles();
     test_accounting();
     test_sampler();
     test_report();
     test_ab();
+    test_real_frames();
     if (fails) { fprintf(stderr, "%d failed\n", fails); return 1; }
     fprintf(stderr, "all passed\n");
     return 0;

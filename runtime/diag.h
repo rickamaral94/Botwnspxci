@@ -64,6 +64,11 @@ bool diag_in_gameplay(void);
 bool diag_sampler_allowed(void);                                       // not with native game code (its own signal state)                                           // not in a menu, a pause or an event
 const char *diag_function_name(uint64_t pc, uint64_t *offset);         // f_<guest address> for game code, else NULL
 const char *diag_report_path(void);                                    // where the report file goes (NULL: log only)
+// (Amaral.15, weak: a backend without it leaves the per-frame counters "n/a") never-reset totals - draws, passes,
+// flushes, dispatches, pipeline binds, set binds, of those only offsets, in-place breaks, feedback copies, GPU waits ns,
+// submit ns, guest copies reused bytes, then ring bytes by source (cb, vertex, index, gmem, cbwin, textures, other);
+// returns how many it filled
+int diag_frame_counters(uint64_t *c, int n) __attribute__((weak));
 
 #ifdef DIAG_TESTING
 // (tests) the pure parts: percentiles, the per-thread accounting and the ring

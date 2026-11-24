@@ -309,6 +309,28 @@ static uint64_t tid_cpu(int tid) {
 
 static void report_start(void);
 
+// ---------------------------------------------------------------- real frames (Amaral.15)
+// One row per frame the game drew (diag_real_frame; with the frame generation, the generated images aside): its time
+// since the previous one, the render and main threads' own CPU time, the GPU busy time (the submissions' timestamps,
+// idle excluded), and the runtime's counters over it (diag_frame_counters). The report sums them; the rows go to a CSV
+// beside it. Two clock reads, two CPU-clock reads and a copy of 19 numbers a frame.
+enum { RC_DRAWS, RC_PASSES, RC_FLUSHES, RC_DISPATCH, RC_PIPE, RC_SETS, RC_OFFS, RC_BREAKS, RC_FBCOPY, RC_WAIT_NS, RC_SUBMIT_NS,
+       RC_REUSED, RC_UP, RC_N = RC_UP + 7 };
+static const char *const rc_name[RC_N] = {"draws", "passes", "flushes", "dispatches", "pipe_binds", "set_binds", "set_binds_offsets_only",
+                                          "inplace_breaks", "feedback_copies", "gpu_wait_us", "submit_us", "guest_reused_kb",
+                                          "up_cb_kb", "up_vertex_kb", "up_index_kb", "up_gmem_kb", "up_cbwin_kb", "up_texture_kb",
+                                          "up_other_kb"};
+#define RF_MAX 8192
+typedef struct { uint32_t dt_us, rcpu_us, mcpu_us, gpu_us; uint32_t c[RC_N]; uint8_t flags; } RfRow;  // flags: 1 play, 4 A/B on, 8 warm-up
+static RfRow *rf_rows;
+static int rf_nrows, rf_ncounters;  // (rf_ncounters: how many of c[] the runtime fills; 0: none)
+static uint64_t rf_lt, rf_lrcpu, rf_lmcpu, rf_lgpu, rf_lc[RC_N];
+static void rf_counters(uint64_t *c) {
+    memset(c, 0, sizeof(uint64_t) * RC_N);
+    rf_ncounters = diag_frame_counters ? diag_frame_counters(c, RC_N) : 0;
+}
+static uint32_t rf_u32(uint64_t v) { return v > 0xffffffffull ? 0xffffffffu : (uint32_t)v; }
+
 void diag_request_ab(int seconds) {
     if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
     const char *what = getenv("LARECOMP_COMPARE"), *ab = getenv("LARECOMP_AB");
@@ -328,6 +350,7 @@ void diag_request(int seconds) {
     atomic_store(&win_t0, ~0ull);
     atomic_store(&win_t1, ~0ull);
     f_n = f_ncomp = f_nmenu = f_nshown = 0;
+    rf_nrows = 0, rf_lt = 0;
     f_last_shown = 0;
     f_last = f_last_gpu = 0;
     cl_n = cl_samples = 0;
@@ -381,6 +404,27 @@ void diag_real_frame(void) {
 #endif
     }
     ab_t = now;
+    {   // (the real-frame table)
+        uint64_t c[RC_N], rcpu = thread_cpu(), mcpu = tid_cpu(atomic_load(&g_main_tid)), gpu = diag_gpu_busy_total_ns();
+        rf_counters(c);
+        if (!rf_rows) rf_rows = calloc(RF_MAX, sizeof *rf_rows);
+        if (rf_lt && rf_rows && rf_nrows < RF_MAX) {
+            RfRow *r = &rf_rows[rf_nrows++];
+            r->dt_us = rf_u32((now - rf_lt) / 1000);
+            r->rcpu_us = rf_u32((rcpu - rf_lrcpu) / 1000);
+            r->mcpu_us = rf_u32(mcpu >= rf_lmcpu ? (mcpu - rf_lmcpu) / 1000 : 0);
+            r->gpu_us = rf_u32(gpu >= rf_lgpu ? (gpu - rf_lgpu) / 1000 : 0);
+            for (int i = 0; i < RC_N; i++) {
+                uint64_t d = c[i] >= rf_lc[i] ? c[i] - rf_lc[i] : 0;
+                if (i == RC_WAIT_NS || i == RC_SUBMIT_NS) d /= 1000;           // (ns -> us)
+                else if (i >= RC_REUSED) d = (d + 1023) / 1024;               // (bytes -> KB)
+                r->c[i] = rf_u32(d);
+            }
+            r->flags = (uint8_t)((diag_in_gameplay() ? 1 : 0) | (g_diag_ab == 1 ? 4 : 0) | (ab_warm ? 8 : 0));
+        }
+        rf_lt = now, rf_lrcpu = rcpu, rf_lmcpu = mcpu, rf_lgpu = gpu;
+        memcpy(rf_lc, c, sizeof rf_lc);
+    }
 }
 void diag_gpu_composition(uint64_t ns) {
     if (atomic_load(&g_state) == 2 && f_ncomp < FMAX) f_comp[f_ncomp++] = ns;
@@ -743,6 +787,73 @@ static int cmp_busy(const void *a, const void *b) {
     return bx < by ? 1 : bx > by ? -1 : 0;
 }
 
+// (the report) the real-frame table: times as stat_line does (us -> ns), counters per real frame, and the slowest 5%
+// of gameplay real frames against the middle half - what grows when the frame rate drops
+static void rf_report(void) {
+    int n = 0;
+    for (int i = 0; i < rf_nrows; i++) n += rf_rows[i].flags & 1;
+    out("-- real frames (each a frame the game drew, generated ones aside; times from one to the next): %d in gameplay", n);
+    if (!n) return;
+    uint64_t *v = malloc(sizeof *v * (size_t)n);
+    if (!v) return;
+    const char *tn[4] = {"real frame time", "render thread CPU per real frame", "main thread CPU per real frame",
+                         "GPU busy per real frame (timestamps)"};
+    for (int f = 0; f < 4; f++) {
+        int k = 0;
+        for (int i = 0; i < rf_nrows; i++) {
+            if (!(rf_rows[i].flags & 1)) continue;
+            const RfRow *r = &rf_rows[i];
+            uint32_t x = f == 0 ? r->dt_us : f == 1 ? r->rcpu_us : f == 2 ? r->mcpu_us : r->gpu_us;
+            v[k++] = (uint64_t)x * 1000;
+        }
+        stat_line(tn[f], v, k, NULL, 0, 0);
+    }
+    if (!rf_ncounters) { out("per real frame counters: n/a (this backend gives none)"); free(v); return; }
+    // the slowest 5% (frame time at or over the 95th percentile) against the middle half (25th-75th)
+    int k = 0;
+    for (int i = 0; i < rf_nrows; i++) if (rf_rows[i].flags & 1) v[k++] = rf_rows[i].dt_us;
+    double p25 = percentile(v, k, 25), p75 = percentile(v, k, 75), p95 = percentile(v, k, 95);
+    double all[RC_N + 4] = {0}, mid[RC_N + 4] = {0}, slow[RC_N + 4] = {0};
+    int na = 0, nm = 0, ns = 0;
+    for (int i = 0; i < rf_nrows; i++) {
+        const RfRow *r = &rf_rows[i];
+        if (!(r->flags & 1)) continue;
+        double x[RC_N + 4] = {r->dt_us / 1e3, r->rcpu_us / 1e3, r->mcpu_us / 1e3, r->gpu_us / 1e3};
+        for (int c = 0; c < RC_N; c++) x[4 + c] = r->c[c];
+        bool m = r->dt_us >= p25 && r->dt_us <= p75, sl = r->dt_us >= p95;
+        for (int c = 0; c < RC_N + 4; c++) { all[c] += x[c]; if (m) mid[c] += x[c]; if (sl) slow[c] += x[c]; }
+        na++, nm += m, ns += sl;
+    }
+    out("per real frame, mean over all gameplay real frames / the middle half (frame time %.1f-%.1f ms) / the slowest 5%% "
+        "(%.1f ms and over): %d / %d / %d frames", p25 / 1e3, p75 / 1e3, p95 / 1e3, na, nm, ns);
+    static const char *const tname[4] = {"frame time ms", "render CPU ms", "main CPU ms", "GPU busy ms"};
+    for (int c = 0; c < RC_N + 4; c++) {
+        if (c >= 4 && c - 4 >= rf_ncounters) break;
+        out("  %-26s %10.2f %10.2f %10.2f", c < 4 ? tname[c] : rc_name[c - 4], all[c] / na, nm ? mid[c] / nm : 0, ns ? slow[c] / ns : 0);
+    }
+    free(v);
+}
+// (the report's copy) the real-frame rows as a CSV beside it
+static void rf_csv(const char *path) {
+    FILE *f = rf_nrows ? fopen(path, "w") : NULL;
+    if (!f) return;
+    fprintf(f, "frame,gameplay,ab_on,warmup,frame_us,render_cpu_us,main_cpu_us,gpu_busy_us");
+    for (int c = 0; c < RC_N; c++) fprintf(f, ",%s", rc_name[c]);
+    fprintf(f, "\n");
+    for (int i = 0; i < rf_nrows; i++) {
+        const RfRow *r = &rf_rows[i];
+        fprintf(f, "%d,%d,%d,%d,%u,%u,%u,%u", i, r->flags & 1, (r->flags >> 2) & 1, (r->flags >> 3) & 1, r->dt_us, r->rcpu_us,
+                r->mcpu_us, r->gpu_us);
+        for (int c = 0; c < RC_N; c++) {
+            if (c < rf_ncounters) fprintf(f, ",%u", r->c[c]);
+            else fprintf(f, ",na");
+        }
+        fprintf(f, "\n");
+    }
+    fclose(f);
+    LOG("[diag] %d real frames -> %s\n", rf_nrows, path);
+}
+
 static void *report_main(void *arg) {
     (void)arg;
     struct timespec ts = {0, 300000000};
@@ -805,6 +916,7 @@ static void *report_main(void *arg) {
             (unsigned long long)(gpu_mhz_n ? gpu_mhz_sum / (uint64_t)gpu_mhz_n : 0), cl,
             temp_max > -1e8f ? temp_min : 0.0f, temp_max > -1e8f ? temp_max : 0.0f);
     }
+    rf_report();
     out("-- frames (the time between two vkQueuePresentKHR on the render thread)");
     stat_line("present interval, gameplay", f_interval, f_n, f_flags, 1, 1);
     stat_line("  of which with the sampler on", f_interval, f_n, f_flags, 3, 3);
@@ -863,14 +975,15 @@ static void *report_main(void *arg) {
 #ifndef DIAG_TESTING
         {   // (vulkan/exec.c cq_resolve: the ends left out as further ahead than the host's time allows - Amaral.9;
             // since the start of the run, and the texture checks the "tex check" helper took - jobs, found differing)
-            extern uint64_t vk_gpu_ts_bogus(void), vk_gpu_ts_stale(void);
+            extern uint64_t vk_gpu_ts_bogus(void), vk_gpu_ts_stale(void), vk_rt_view_fallbacks(void);
             extern void vk_tex_check_stats(uint64_t *jobs, uint64_t *hits);
             uint64_t j, hh;
             vk_tex_check_stats(&j, &hh);
             out("GPU timestamps left out as ahead of the host's time (since the start): %llu, last ends left behind as "
-                "stale: %llu; texture checks on the helper thread: %llu, %llu found differing",
+                "stale: %llu; texture checks on the helper thread: %llu, %llu found differing; views of format-listed "
+                "render targets in another format (given their own: a possible wrong colour): %llu",
                 (unsigned long long)vk_gpu_ts_bogus(), (unsigned long long)vk_gpu_ts_stale(), (unsigned long long)j,
-                (unsigned long long)hh);
+                (unsigned long long)hh, (unsigned long long)vk_rt_view_fallbacks());
         }
 #endif
     }
@@ -982,6 +1095,12 @@ static void *report_main(void *arg) {
             LOG("[diag] report copied to %s\n", copy);
         }
         if (in) fclose(in);
+        {
+            char csv[1200];
+            snprintf(csv, sizeof csv, "%.*s-%04d%02d%02d-%02d%02d%02d-frames.csv", stem, path, tm.tm_year + 1900, tm.tm_mon + 1,
+                     tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+            rf_csv(csv);
+        }
 #if defined(__ANDROID__) && !defined(DIAG_TESTING)
         {   // (the GPU driver's own lines in logcat - TU_DEBUG=perf, its warnings - beside the report: the driver's evidence)
             extern int plat_driver_logcat(const char *path);

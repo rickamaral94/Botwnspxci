@@ -533,12 +533,18 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     // stores move it whole (from p5r-android's notes). BOTW views none in another format (title, world: logged) but the
     // window's sRGB; a view that asks for one gets the image's own (vk_view). On Turnip it made no difference (UBWC,
     // docs/BOTW-PORT.md), and it once broke a compressed image there (exec.c post_image): Mali only.
-    // LARECOMP_VK_RT_FORMAT_LIST=1 / 0 (LARECOMP_VK_NO_MUTABLE=1 as 1).
+    // (Amaral.15: Turnip on Adreno 7xx too - device.c vk_rt_format_list_auto: its GPU trace showed the game's colour
+    // targets without UBWC, and the list took ~3 ms of GPU off a real frame on the Odin; the old "no difference" was an
+    // earlier driver.) LARECOMP_VK_RT_FORMAT_LIST=1 / 0 (LARECOMP_VK_NO_MUTABLE=1 as 1).
     static int rt_list = -1;
     if (rt_list < 0) {
         const char *e = getenv("LARECOMP_VK_RT_FORMAT_LIST");
-        rt_list = e ? atoi(e) != 0 : getenv("LARECOMP_VK_NO_MUTABLE") != NULL || g_vk.props.vendorID == 0x13B5;
-        if (rt_list) LOG("[vk] render targets without mutable formats (their sRGB twin in a format list)\n");
+        extern bool vk_rt_format_list_auto(void);
+        bool autoon = !e && !getenv("LARECOMP_VK_NO_MUTABLE") && g_vk.props.vendorID != 0x13B5 && vk_rt_format_list_auto();
+        rt_list = e ? atoi(e) != 0 : getenv("LARECOMP_VK_NO_MUTABLE") != NULL || g_vk.props.vendorID == 0x13B5 || autoon;
+        LOG("[vk] render targets: %s (%s)\n", rt_list ? "without mutable formats, their sRGB twin in a format list (UBWC kept)"
+                                                       : "mutable formats",
+            e ? "LARECOMP_VK_RT_FORMAT_LIST" : autoon ? "automatic: Turnip on Adreno 7xx" : "automatic");
     }
     VkFormat twin = vf == VK_FORMAT_R8G8B8A8_UNORM ? VK_FORMAT_R8G8B8A8_SRGB : vf == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM
                   : vf == VK_FORMAT_B8G8R8A8_UNORM ? VK_FORMAT_B8G8R8A8_SRGB : vf == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM
@@ -663,7 +669,7 @@ static uint64_t bc_upload_blocks(VkCommandBuffer cb, TexBackend *b, const uint8_
     uint32_t bpp;
     bc_target(b->bc_vf, &bpp);
     uint64_t out_size = bpp ? (uint64_t)wb * 4 * hb * 4 * bpp : (uint64_t)wb * hb * 16;
-    VkSpan s = vk_transient(out_size, 16);
+    VkSpan s = vk_transient_tex(out_size, 16);
     bool measure_decode = bench_on();
     uint64_t decode_start = (decode_ns || measure_decode) ? SDL_GetTicksNS() : 0;
     if (bpp) bc_decode(b->bc_vf, blocks, wb, hb, bsize, s.ptr, bpp);
@@ -1078,7 +1084,7 @@ static void upload_pending(TexBackend *b) {
     bool scaled = b->scalable && (w != b->width || h != b->height);
     if (!scaled && w > b->width) w = b->width;
     if (!scaled && h > b->height) h = b->height;
-    VkSpan s = vk_transient_copy(px, (uint64_t)stride * h, 16);
+    VkSpan s = vk_transient_copy_tex(px, (uint64_t)stride * h, 16);
     free(px);
     VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = stride / 4,
                             .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
@@ -1352,7 +1358,7 @@ static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) 
                 if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * 16, src + (uint64_t)y * LIN_STRIDE(l.wb * 16), l.wb * 16);
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
                 if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, blocks, l.w, l.h, l.wb * 16);
-                VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
+                VkSpan s = vk_transient_tex((uint64_t)l.w * l.h * 4, 16);
                 bool measure_decode = bench_on();
                 uint64_t decode_start = (texture_trace_on() || measure_decode) ? SDL_GetTicksNS() : 0;
                 astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
@@ -1385,7 +1391,7 @@ static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) 
             bool expand = mf.expand_rgb && fi->bpb == 3;
             bool depth16_expand = t->format == 0x32 && b->format == VK_FORMAT_D32_SFLOAT;
             uint32_t out_row = expand || depth16_expand ? l.wb * 4 : row;
-            VkSpan s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
+            VkSpan s = vk_transient_tex((uint64_t)out_row * l.hb * l.d, 16);
             uint8_t *lin = expand || depth16_expand ? texture_scratch(sz) : s.ptr;
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
             if (linear) {
@@ -1637,6 +1643,8 @@ static int rt3d_mode(void) {
 
 // render: attachment view (one level, one layer). Otherwise a sampled view of type want_textype (TEXTYPE_*),
 // with the NVN component swizzle, converting between compatible types the way renderer.m does.
+static uint64_t rt_view_fallbacks;  // (views of a format-listed render target asked in another format: given its own)
+uint64_t vk_rt_view_fallbacks(void) { return rt_view_fallbacks; }
 static VkFormat view_format(VkFormat base_fmt, VkFormat bc_vf, VkImageAspectFlags aspect, bool fixed_fmt, VkFormat view_alt,
                             const NvnTexture *t, const NvnTextureView *v, bool has_view, bool warn) {
     if (!has_view) v = NULL;
@@ -1649,6 +1657,7 @@ static VkFormat view_format(VkFormat base_fmt, VkFormat bc_vf, VkImageAspectFlag
 #endif
         if (fixed_fmt && fmt != base_fmt && fmt != view_alt) {  // (not in its format list: create_image)
             if (warn) {
+                rt_view_fallbacks++;
                 static int nlog;
                 if (nlog++ < 8) LOG("[vk] a view of render target %ux%u (nvn %#x) as nvn %#x: in its own format\n", t->width, t->height,
                                     t->format, v->format);
@@ -1838,7 +1847,7 @@ static void bc_shadow_fill(NvnTexture *t, TexBackend *b, BcShadow *s, const BcSh
         for (uint32_t lv = 0; lv < levels; lv++) {
             LevelLayout l = tegra_level(&t->layout, lv);
             uint32_t d = is3d ? l.d : 1, row = l.wb * s->bsize;
-            VkSpan sp = vk_transient((uint64_t)row * l.hb * d, 16);
+            VkSpan sp = vk_transient_tex((uint64_t)row * l.hb * d, 16);
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
             if (t->flags & 0x50)  // (linear: rows t->stride apart with flag 0x10, packed with 0x40 - upload_texture)
                 for (uint32_t y = 0; y < l.hb * d; y++)

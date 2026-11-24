@@ -2334,6 +2334,14 @@ bool vk_inplace_reads_on(int setting) {
     int n = adreno_number(g_vk.props.deviceName);
     return n >= 700 && n < 900;
 }
+// (textures.c, Amaral.15) render targets with a format list instead of MUTABLE_FORMAT by default: Turnip on Adreno 7xx.
+// Turnip turns UBWC off for a MUTABLE_FORMAT image without a compatible format list - the Odin's GPU trace showed every
+// colour target of the game "ubwc=n" (depth "y"), and its one session with the list read 26.9 ms of GPU a real frame at
+// 4,500 draws against 29.0-30.3 in five without it (docs/logs/2026-11-24-amaral15.md). 8xx and other drivers unmeasured.
+bool vk_rt_format_list_auto(void) {
+    int n = adreno_number(g_vk.props.deviceName);
+    return vk_driver_is_turnip() && n >= 700 && n < 800;
+}
 bool vk_turnip_heap_ram_off(void) {  // (also the start screen's note under the setting)
     int n = adreno_number(g_vk.props.deviceName);
     if (n < 600 || n >= 700) return false;

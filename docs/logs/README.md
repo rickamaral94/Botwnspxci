@@ -23,6 +23,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [Amaral.13, 24/11](2026-11-24-amaral13.md) | Odin + host, APK 51 | A conta da GPU certa desde o início (3 fins descartados). SMAA: 1,06 ms contra 0,4 do FXAA. A máscara do HUD da geração de quadros custava 2,8 ms; agora é feita na metade do tamanho. |
 | [Amaral.14, 24/11](2026-11-24-amaral14.md) | host, APK 52 | Medições para o agente do Turnip: quantos binds de set são só de offset dinâmico (custam como um set novo no Turnip), e a geração de quadros separada da máscara do HUD na tabela por passe. |
 | [Amaral.14 no Odin, 24/11](2026-11-24-amaral14-odin.md) | Odin, 6 sessões + 2 traces | O lab do driver (bindless mask) não dá ganho mensurável. Os traces mostram as cores do jogo sem UBWC e o G-buffer em ~55 passes por quadro; com a lista de formatos, a GPU caiu para 24,4 ms (uma sessão, A/B/A pendente). |
+| [Amaral.15, 24/11](2026-11-24-amaral15.md) | host, APK 53 (candidata, sem release) | A queda sustentada é da GPU (31–33 ms por quadro real com 5 mil draws; CPUs 15–21 ms). Telemetria por quadro real com CSV e bytes por origem; UBWC nos alvos de cor no Turnip 7xx (lista de formatos). A/B/A no Odin pendente. |
 
 ## Revisões externas e Turnip
 
