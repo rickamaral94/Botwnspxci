@@ -15,6 +15,10 @@ on:
       tag:
         description: "Tag da release (ex.: v0.4.7-beta-amaral.5)"
         required: true
+      note:
+        description: "Aviso no início das notas (ex.: candidata de teste, não validada no aparelho)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -139,6 +143,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
+          NOTE: ${{ inputs.note }}
         run: |
+          BODY="BOTWDroid Amaral $TAG. Nenhum arquivo do jogo incluído: use os seus. Certificado SHA-256 em docs/SIGNING-AMARAL.md; confira com SHA256SUMS."
+          if [ -n "$NOTE" ]; then BODY="$NOTE
+
+          $BODY"; fi
           gh release create "$TAG" out/*.apk out/*.gz out/SHA256SUMS --prerelease --target "$GITHUB_SHA" --title "$TAG" \
-            --notes "BOTWDroid Amaral $TAG. Nenhum arquivo do jogo incluído: use os seus. Certificado SHA-256 em docs/SIGNING-AMARAL.md; confira com SHA256SUMS."
+            --notes "$BODY"
