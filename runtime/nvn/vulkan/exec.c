@@ -72,7 +72,7 @@ static uint64_t stat_inplace_breaks;  // (passes ended so a draw reads a target 
 static uint64_t stat_upload_bytes;
 static uint64_t stat_cb_bytes[2], stat_cb_n[2], stat_cb_copied, stat_cbwin;  // (LARECOMP_LOG_CBUF_BYTES: game constant buffers bound,
                                                                  // fixed [0] / dynamically indexed [1], and bytes copied)
-static uint64_t stat_pipe_binds, stat_set_binds;  // (graphics draws: pipelines / descriptor sets bound)
+static uint64_t stat_pipe_binds, stat_set_binds, stat_set_binds_offs;  // (graphics draws: pipelines / descriptor sets bound; of those, the same sets with other dynamic offsets)
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
 static int prof = -1;
@@ -2288,11 +2288,11 @@ const char *renderer_stats(void) {
     compiles_before += (uint64_t)compiles;
     skipped_before += stat_skipped;
     snprintf(stats_text, sizeof stats_text,
-             "%llu draws, %llu skipped, %llu passes, %llu dispatches (%llu chained), %llu flushes, wait %.0fms, compile %d (waited %.0fms), fbcopy %llu (read %llu, breaks %llu), upload %.1fMB, binds %llu pipe %llu sets",
+             "%llu draws, %llu skipped, %llu passes, %llu dispatches (%llu chained), %llu flushes, wait %.0fms, compile %d (waited %.0fms), fbcopy %llu (read %llu, breaks %llu), upload %.1fMB, binds %llu pipe %llu sets (%llu only offsets)",
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_dchained, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              compiles, (double)stat_build_wait_ns / 1e6, (unsigned long long)stat_feedback_copies, (unsigned long long)stat_feedback_reads, (unsigned long long)stat_inplace_breaks, (double)stat_upload_bytes / 1048576.0,
-             (unsigned long long)stat_pipe_binds, (unsigned long long)stat_set_binds);
+             (unsigned long long)stat_pipe_binds, (unsigned long long)stat_set_binds, (unsigned long long)stat_set_binds_offs);
     LOG("[guest-copy-diag] mode=%d copied=%.2fMB reused=%.2fMB grow_saved=%.2fMB tail_appends=%llu; vertex binds direct=%llu "
         "copied=%llu; same renderer interval\n",
         gcopy_range_mode > 0, gcopy_copied / 1048576.0, gcopy_reused / 1048576.0,
@@ -2305,7 +2305,7 @@ const char *renderer_stats(void) {
     warm_stats();
 #endif
     gcopy_copied = gcopy_reused = gcopy_grow_saved = gcopy_grow_appends = gcopy_vtx_direct = gcopy_vtx_copied = 0;
-    stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
+    stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = stat_set_binds_offs = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
         LOG("[cbuf] fixed %llu x %.1f KB, dynamic %llu x %.1f KB; copied %.1f MB; in place, patched %llu\n",
             (unsigned long long)stat_cb_n[0], stat_cb_n[0] ? stat_cb_bytes[0] / 1024.0 / stat_cb_n[0] : 0,
@@ -9629,6 +9629,11 @@ static void draw_(CmdRec *r, bool indexed) {
     uint32_t nd = ndv + ndf;
     if (ss_need(SS_SETS, ss.layout == pr->layout && ss.sets[0] == vset && ss.sets[1] == fset && ss.ndyn == nd &&
                        !memcmp(ss.dyn, dyn, nd * sizeof dyn[0]))) {
+        // (Amaral.14, for the Turnip agent: a bind of the same sets with other dynamic offsets - the draw's constants at
+        // another place in the transient ring - costs Turnip as much as new sets: a reserved set copied, every bindless
+        // base written again and all 8 sets' descriptor cache dropped. How many of the binds are those)
+        if (ss_on && (ss.known & SS_SETS) && ss.layout == pr->layout && ss.sets[0] == vset && ss.sets[1] == fset)
+            stat_set_binds_offs++;
         ss.layout = pr->layout, ss.sets[0] = vset, ss.sets[1] = fset;
         ss.ndyn = nd;
         memcpy(ss.dyn, dyn, nd * sizeof dyn[0]);
