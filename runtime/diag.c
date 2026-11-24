@@ -863,12 +863,13 @@ static void *report_main(void *arg) {
 #ifndef DIAG_TESTING
         {   // (vulkan/exec.c cq_resolve: the ends left out as further ahead than the host's time allows - Amaral.9;
             // since the start of the run, and the texture checks the "tex check" helper took - jobs, found differing)
-            extern uint64_t vk_gpu_ts_bogus(void);
+            extern uint64_t vk_gpu_ts_bogus(void), vk_gpu_ts_stale(void);
             extern void vk_tex_check_stats(uint64_t *jobs, uint64_t *hits);
             uint64_t j, hh;
             vk_tex_check_stats(&j, &hh);
-            out("GPU timestamps left out as ahead of the host's time (since the start): %llu; texture checks on the helper "
-                "thread: %llu, %llu found differing", (unsigned long long)vk_gpu_ts_bogus(), (unsigned long long)j,
+            out("GPU timestamps left out as ahead of the host's time (since the start): %llu, last ends left behind as "
+                "stale: %llu; texture checks on the helper thread: %llu, %llu found differing",
+                (unsigned long long)vk_gpu_ts_bogus(), (unsigned long long)vk_gpu_ts_stale(), (unsigned long long)j,
                 (unsigned long long)hh);
         }
 #endif

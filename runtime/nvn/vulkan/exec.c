@@ -409,6 +409,8 @@ static void note_gmem_store(int stage);  // (below: it reads the bound storage b
 #define CQ_QUERIES (CQ_MAX + 2)
 static uint64_t gpu_ts_bogus;  // (cq_resolve: ends further ahead than the host's time allows, left out)
 uint64_t vk_gpu_ts_bogus(void) { return gpu_ts_bogus; }
+static uint64_t gpu_ts_stale;  // (cq_resolve: the last end left behind, a start far before it)
+uint64_t vk_gpu_ts_stale(void) { return gpu_ts_stale; }
 static uint64_t gpu_ts_dropped, gpu_ts_ok, gpu_ts_unread, gpu_ts_covered, gpu_ts_backwards, gpu_ts_ns_lost;  // (diag.c: how much of it was read)
 static _Atomic uint64_t gpu_busy_total;  // (GPU ns working, all submissions so far: ADPF's GPU time per frame)
 static double g_pace_gpu_ms;  // (the last presented frame's GPU busy time: LARECOMP_LOG_PACE)
@@ -812,6 +814,19 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
             static int guard = -1;
             static int64_t last_end_host;
             static int nbogus;
+            // (Amaral.12: the Odin's raw log, LARECOMP_LOG_GPU_TS - every submission of the measurement's start read
+            // "last end 37857.858 -> adds 0.000 ms": an end 37.9 s ahead, from before the measurement and past the guard
+            // below, held the union at 0 for the first 38 s, the "GPU per real frame 0.00", then 27-29 ms. The queue runs
+            // its submissions in order: a start more than 250 ms before the last end means that end was wrong. It's left
+            // behind, and the first 4 logged.)
+            if (last_end >= 0 && s0 + 250000000 < last_end) {
+                static int nstale;
+                gpu_ts_stale++;
+                if (nstale++ < 4)
+                    LOG("[gpu-ts] submission %llu starts %.1f ms before the last end: that end left behind\n",
+                        (unsigned long long)q->seq, (last_end - s0) / 1e6);
+                last_end = -1;
+            }
             if (guard < 0) guard = !getenv("LARECOMP_GPU_TS_GUARD") || atoi(getenv("LARECOMP_GPU_TS_GUARD"));
             int64_t host_now = (int64_t)plat_now_ns();
             if (guard && last_end >= 0 && s1 > last_end && s1 - last_end > host_now - last_end_host + 100000000) {
@@ -1171,19 +1186,35 @@ void vk_passprof_report(void (*emit)(const char *line)) {
         if (hi < 0 || m > pp_win[hi].ms / pp_win[hi].frames) hi = i;
     }
     if (lo < 0 || hi == lo) { emit("GPU per pass kind: too few sampled gameplay frames"); return; }
+    // (Amaral.12: the heaviest window can be a transition - the Odin's was 58 ms a frame at a load's fade, its play
+    // 27-29 ms - so the typical one, the median window, is shown beside it)
+    int md = -1;
+    {
+        static int idx[PP_WIN];
+        int n = 0;
+        for (int i = 0; i < pp_nwin; i++) if (pp_win[i].frames >= 2) idx[n++] = i;
+        for (int a = 1; a < n; a++) {  // (insertion sort by ms a frame: at most 96)
+            int v = idx[a], b = a;
+            double m = pp_win[v].ms / pp_win[v].frames;
+            while (b > 0 && pp_win[idx[b - 1]].ms / pp_win[idx[b - 1]].frames > m) idx[b] = idx[b - 1], b--;
+            idx[b] = v;
+        }
+        md = idx[n / 2];
+    }
     snprintf(line, sizeof line, "GPU per pass kind, a gameplay frame sampled every 30: heaviest 2 s window (#%d) %.2f ms a frame, "
-             "lightest (#%d) %.2f ms; kinds by the heaviest's time:", hi, pp_win[hi].ms / pp_win[hi].frames, lo,
-             pp_win[lo].ms / pp_win[lo].frames);
+             "typical (#%d, the median) %.2f ms, lightest (#%d) %.2f ms; kinds by the typical's time:", hi,
+             pp_win[hi].ms / pp_win[hi].frames, md, pp_win[md].ms / pp_win[md].frames, lo, pp_win[lo].ms / pp_win[lo].frames);
     emit(line);
-    static PpKind k[PP_KINDS];
-    int nk = pp_win[hi].nk;
-    memcpy(k, pp_win[hi].k, sizeof *k * (size_t)nk);
+    static PpKind k[PP_KINDS];  // (the typical window's kinds, by its time: what play costs; then the extremes')
+    int nk = pp_win[md].nk;
+    memcpy(k, pp_win[md].k, sizeof *k * (size_t)nk);
     qsort(k, (size_t)nk, sizeof *k, pp_cmp);
     for (int i = 0; i < nk && i < 16; i++) {
-        double light = 0;
+        double light = 0, heavy = 0;
         for (int j = 0; j < pp_win[lo].nk; j++) if (pp_win[lo].k[j].h == k[i].h) light = pp_win[lo].k[j].ms;
-        snprintf(line, sizeof line, "  %7.3f ms (lightest %7.3f, %+7.3f)  %s", k[i].ms / pp_win[hi].frames,
-                 light / pp_win[lo].frames, k[i].ms / pp_win[hi].frames - light / pp_win[lo].frames, k[i].label);
+        for (int j = 0; j < pp_win[hi].nk; j++) if (pp_win[hi].k[j].h == k[i].h) heavy = pp_win[hi].k[j].ms;
+        snprintf(line, sizeof line, "  %7.3f ms (heaviest %7.3f, lightest %7.3f)  %s", k[i].ms / pp_win[md].frames,
+                 heavy / pp_win[hi].frames, light / pp_win[lo].frames, k[i].label);
         emit(line);
     }
 }
