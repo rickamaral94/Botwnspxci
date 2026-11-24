@@ -17,6 +17,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [Amaral.8, 24/11](2026-11-24-amaral8.md) | Host, APK 46 | Leitura direta dos alvos no Automático da 740 (as cópias eram 17 de 38,5 ms por quadro); pré-aquecimento pela lista de volta, com a lista distribuída no APK. |
 | [Ports de Switch para Android, 24/11](2026-11-24-ports-android.md) | Avaliação | totk-android (mesmo SoC do Odin), TOTKDroid, Peanuts Native (GPL: só ideias): 12 técnicas por ordem de ganho. |
 | [Amaral.9, 24/11](2026-11-24-amaral9.md) | Host, APK 47 | Fases 0 e 1 do plano da gravação em várias threads: GPU por quadro protegido, símbolos no release; checagem e hash de texturas em threads auxiliares, micro-cortes (do TOTKDroid). |
+| [Amaral.10, 24/11](2026-11-24-amaral10.md) | Host, APK 48 | A lista de pipelines no APK (1.074) e a leitura dela corrigida; thread de fila (experimental) para a espera de 40% no present; registro cru dos timestamps de GPU. |
 
 ## Revisões externas e Turnip
 

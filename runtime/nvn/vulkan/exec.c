@@ -822,6 +822,21 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
                         (host_now - last_end_host) / 1e6, (s1 - s0) / 1e6);
                 goto ts_done;
             }
+            {   // (LARECOMP_LOG_GPU_TS=<n>: the first n submissions' raw times, in ms from the first one's start - why the
+                // "GPU per real frame" reads 0.00 on the Odin since 0.4.7, the guard above never firing - Amaral.10)
+                static long nlog = -2;
+                static int64_t t_first;
+                if (nlog == -2) nlog = getenv("LARECOMP_LOG_GPU_TS") ? atol(getenv("LARECOMP_LOG_GPU_TS")) : 0;
+                if (nlog > 0) {
+                    if (!t_first) t_first = s0;
+                    nlog--;
+                    int64_t add = s1 > s0 ? s1 - (s0 > last_end ? s0 : last_end > s1 ? s1 : last_end) : 0;
+                    LOG("[gpu-ts] seq %llu%s: start %.3f end %.3f (%.3f ms) last end %.3f -> adds %.3f ms; host %.3f\n",
+                        (unsigned long long)q->seq, q->presentation ? " (present)" : "", (s0 - t_first) / 1e6,
+                        (s1 - t_first) / 1e6, (s1 - s0) / 1e6, last_end >= 0 ? (last_end - t_first) / 1e6 : -1.0, add / 1e6,
+                        host_now / 1e6);
+                }
+            }
             if (s1 > s0) {
                 uint64_t ns = (uint64_t)(s1 - (s0 > last_end ? s0 : last_end > s1 ? s1 : last_end));
                 gpu_busy_total += ns;
@@ -1195,6 +1210,168 @@ static bool dchain;              // the last GPU work recorded was a dispatch; s
 static VkCommandBuffer dchain_cb;
 static bool dchain_after;        // that dispatch's barrier after it is still owed
 
+#ifdef __ANDROID__
+// ================================================================== the queue thread (Video > Queue thread, experimental)
+// The Odin 2 without a frame cap (Amaral.9, 24/11): the render thread 97% busy - 51% working, 40% inside
+// vkQueuePresentKHR (5.8 ms a present: Android's BufferQueue, not the driver - the Turnip agent, 20/11). A VkQueue is
+// used by one thread at a time and a present holds it for its whole wait, so the present can't simply move: a thread
+// of its own takes every submission and present, in order (DXVK's submission thread), and the render thread copies
+// them into its FIFO and goes on to the next frame.
+// - Fences and GPU progress are unchanged: the waiter thread waits on a fence the queue thread submits a little later
+//   (a wait on a fence not yet submitted just waits).
+// - Only with the fence waiter on (Turnip) and frame generation off (lsfg's framegen submits on this queue from the
+//   render thread). The choice is made at a frame's start (vk_qt_frame); turning it off drains the FIFO first.
+// - Whatever else needs the queue (the swapchain made again, ImGui's font upload) drains it and holds it (vk_queue_hold).
+// - A present's error (out of date, surface lost) reaches the render thread at its next present.
+// LARECOMP_VK_QUEUE_THREAD=1 / 0 over the setting; "Measure and compare" alternates it (diag.c, LARECOMP_COMPARE=queue).
+enum { QT_N = 64 };
+typedef struct {
+    int kind;  // 1 submit, 2 present
+    VkSubmitInfo2 si;
+    VkCommandBufferSubmitInfo cbs[4];
+    VkSemaphoreSubmitInfo wt[2], sig[2];
+    VkFence fence;
+    uint64_t seq;
+    VkPresentInfoKHR pi;
+    VkSwapchainKHR sc;
+    uint32_t image;
+    VkSemaphore psem;
+    VkPresentTimesInfoGOOGLE times;
+    VkPresentTimeGOOGLE when;
+} QtJob;
+static QtJob qt_q[QT_N];
+static unsigned qt_head, qt_tail;  // (under qt_m)
+static bool qt_busy, qt_started, qt_active;
+static pthread_mutex_t qt_m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t qt_more = PTHREAD_COND_INITIALIZER, qt_space = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t qt_exec = PTHREAD_MUTEX_INITIALIZER;  // (held while the queue is used: the thread, vk_queue_hold)
+static _Atomic int qt_present_err;
+static uint64_t qt_presents, qt_present_ns, qt_submits, qt_waits_full;
+static void *qt_main(void *arg) {
+    (void)arg;
+    pthread_setname_np(pthread_self(), "vk queue");
+    pthread_mutex_lock(&qt_m);
+    for (;;) {
+        while (qt_head == qt_tail) qt_busy = false, pthread_cond_broadcast(&qt_space), pthread_cond_wait(&qt_more, &qt_m);
+        qt_busy = true;
+        QtJob *j = &qt_q[qt_head % QT_N];
+        pthread_mutex_unlock(&qt_m);
+        pthread_mutex_lock(&qt_exec);
+        if (j->kind == 1) {
+            WdMark wd_mark = vk_wd_enter(WD_R_SUBMIT, j->seq);
+            VkResult r = vkQueueSubmit2(g_vk.queue, 1, &j->si, j->fence);
+            vk_wd_leave(wd_mark);
+            if (r == VK_ERROR_DEVICE_LOST) vk_devlost_dump();
+            VK_CHECK(r);
+            qt_submits++;
+        } else {
+            WdMark wd_mark = vk_wd_enter(WD_R_QUEUE_PRESENT, j->when.presentID);
+            uint64_t t0 = plat_now_ns();
+            VkResult r = vkQueuePresentKHR(g_vk.queue, &j->pi);
+            qt_present_ns += plat_now_ns() - t0, qt_presents++;
+            vk_wd_leave(wd_mark);
+            if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&qt_present_err, r);
+        }
+        pthread_mutex_unlock(&qt_exec);
+        pthread_mutex_lock(&qt_m);
+        qt_head++;
+        pthread_cond_broadcast(&qt_space);
+    }
+    return NULL;
+}
+static QtJob *qt_slot(void) {  // (qt_m held on return)
+    pthread_mutex_lock(&qt_m);
+    if (!qt_started) {
+        pthread_t th;
+        qt_started = pthread_create(&th, NULL, qt_main, NULL) == 0;
+        if (qt_started) pthread_detach(th);
+    }
+    while (qt_tail - qt_head >= QT_N) qt_waits_full++, pthread_cond_wait(&qt_space, &qt_m);
+    return &qt_q[qt_tail % QT_N];
+}
+static void qt_push(void) {  // (qt_m held)
+    qt_tail++;
+    pthread_cond_signal(&qt_more);
+    pthread_mutex_unlock(&qt_m);
+}
+// Every queued job done, the thread idle
+void vk_qt_drain(void) {
+    if (!qt_started) return;
+    pthread_mutex_lock(&qt_m);
+    while (qt_head != qt_tail || qt_busy) pthread_cond_wait(&qt_space, &qt_m);
+    pthread_mutex_unlock(&qt_m);
+}
+// The queue for the caller alone (drained first), until vk_queue_release
+void vk_queue_hold(void) { vk_qt_drain(); pthread_mutex_lock(&qt_exec); }
+void vk_queue_release(void) { pthread_mutex_unlock(&qt_exec); }
+static bool qt_wanted(void) {
+    static int env = -2;
+    if (env == -2) env = getenv("LARECOMP_VK_QUEUE_THREAD") ? atoi(getenv("LARECOMP_VK_QUEUE_THREAD")) != 0 : -1;
+    extern volatile int g_diag_ab;
+    extern int g_diag_ab_what;
+    if (g_diag_ab >= 0 && g_diag_ab_what == 2) return g_diag_ab == 1;
+    return env >= 0 ? env : __atomic_load_n(&g_settings.queue_thread, __ATOMIC_RELAXED);
+}
+// (device.c, at a frame's start) whether this frame's submissions and present go through the thread
+void vk_qt_frame(bool framegen) {
+    bool on = qt_wanted() && !framegen && seq_thread_on() && seq_fences_on;
+    if (on == qt_active) return;
+    if (!on) vk_qt_drain();
+    qt_active = on;
+    LOG("[vk] queue thread: %s\n", on ? "on (submissions and presents off the render thread)" : "off");
+}
+bool vk_qt_active(void) { return qt_active; }
+static VkResult qt_submit(const VkSubmitInfo2 *si, VkFence fence, uint64_t seq) {
+    QtJob *j = qt_slot();
+    memset(j, 0, sizeof *j);
+    j->kind = 1, j->si = *si, j->fence = fence, j->seq = seq;
+    uint32_t nc = si->commandBufferInfoCount < 4 ? si->commandBufferInfoCount : 4;
+    uint32_t nw = si->waitSemaphoreInfoCount < 2 ? si->waitSemaphoreInfoCount : 2;
+    uint32_t ns = si->signalSemaphoreInfoCount < 2 ? si->signalSemaphoreInfoCount : 2;
+    memcpy(j->cbs, si->pCommandBufferInfos, sizeof *j->cbs * nc);
+    if (nw) memcpy(j->wt, si->pWaitSemaphoreInfos, sizeof *j->wt * nw);
+    if (ns) memcpy(j->sig, si->pSignalSemaphoreInfos, sizeof *j->sig * ns);
+    j->si.commandBufferInfoCount = nc, j->si.pCommandBufferInfos = j->cbs;
+    j->si.waitSemaphoreInfoCount = nw, j->si.pWaitSemaphoreInfos = nw ? j->wt : NULL;
+    j->si.signalSemaphoreInfoCount = ns, j->si.pSignalSemaphoreInfos = ns ? j->sig : NULL;
+    qt_push();
+    return VK_SUCCESS;
+}
+// (device.c vk_frame_end) a present into the FIFO; the answer: an error a present before this one met, else success
+VkResult vk_qt_present(const VkPresentInfoKHR *pi) {
+    QtJob *j = qt_slot();
+    memset(j, 0, sizeof *j);
+    j->kind = 2, j->pi = *pi;
+    j->sc = pi->pSwapchains[0], j->image = pi->pImageIndices[0], j->psem = pi->waitSemaphoreCount ? pi->pWaitSemaphores[0] : 0;
+    j->pi.swapchainCount = 1, j->pi.pSwapchains = &j->sc, j->pi.pImageIndices = &j->image;
+    j->pi.waitSemaphoreCount = j->psem ? 1 : 0, j->pi.pWaitSemaphores = j->psem ? &j->psem : NULL;
+    j->pi.pResults = NULL;
+    j->pi.pNext = NULL;
+    for (const VkBaseInStructure *n = pi->pNext; n; n = n->pNext)
+        if (n->sType == VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE) {
+            const VkPresentTimesInfoGOOGLE *t = (const VkPresentTimesInfoGOOGLE *)n;
+            j->times = *t, j->times.pNext = NULL;
+            if (t->pTimes) j->when = t->pTimes[0], j->times.pTimes = &j->when;
+            j->pi.pNext = &j->times;
+        }
+    qt_push();
+    return (VkResult)atomic_exchange(&qt_present_err, 0);
+}
+// (renderer_stats, every 10 s) the thread's presents and their time
+static void qt_stats(void) {
+    static uint64_t p0, ns0, s0;
+    if (qt_presents == p0 && qt_submits == s0) return;
+    LOG("[vk] queue thread 10 s: %llu presents, %.2f ms each in vkQueuePresentKHR, %llu submissions, %llu waits for room\n",
+        (unsigned long long)(qt_presents - p0), qt_presents > p0 ? (qt_present_ns - ns0) / 1e6 / (qt_presents - p0) : 0,
+        (unsigned long long)(qt_submits - s0), (unsigned long long)qt_waits_full);
+    p0 = qt_presents, ns0 = qt_present_ns, s0 = qt_submits;
+}
+#else
+void vk_qt_drain(void) {}
+void vk_queue_hold(void) {}
+void vk_queue_release(void) {}
+#endif
+
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra) {
     (void)extra;
     vk_end_pass();
@@ -1258,7 +1435,12 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 #ifdef __ANDROID__
         WdMark wd_mark = vk_wd_enter(WD_R_SUBMIT, submit_seq + 1);  // (freeze watchdog; seq_fence_for may wait inside it)
 #endif
-        VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, seq_fence_for(submit_seq + 1));  // (the waiter thread's)
+        VkFence sfence = seq_fence_for(submit_seq + 1);  // (the waiter thread's)
+#ifdef __ANDROID__
+        VkResult sr = qt_active ? qt_submit(&si, sfence, submit_seq + 1) : vkQueueSubmit2(g_vk.queue, 1, &si, sfence);
+#else
+        VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, sfence);
+#endif
 #ifdef __ANDROID__
         vk_wd_leave(wd_mark);
         tl_add((int64_t)plat_now_ns(), wait || signal ? "render: submitted (present)" : "render: submitted", submit_seq + 1, 0);
@@ -8272,10 +8454,23 @@ static void warm_load(void) {
     warm_next = calloc(WARM_MAX, sizeof *warm_next);
     if (!warm_list || !warm_next) { warm_loaded = 0; return; }
     size_t n = 0;
-    void *buf = SDL_LoadFile("cache/pipe_warm.bin", &n);
+    // (this phone's own: a file in the data root, the working directory - read with stdio, as warm_save writes it.
+    // SDL_LoadFile takes a relative path on Android from the app's internal storage and the APK's assets, not from the
+    // working directory: Amaral.8 never found its own list - "list: 0" at every start, 1,074 in the file)
+    void *buf = NULL;
+    FILE *f = fopen("cache/pipe_warm.bin", "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        buf = len > 0 ? malloc((size_t)len) : NULL;
+        if (buf && fread(buf, 1, (size_t)len, f) == (size_t)len) n = (size_t)len;
+        else free(buf), buf = NULL;
+        fclose(f);
+    }
     int own = warm_read(buf, n, "cache/pipe_warm.bin");
-    SDL_free(buf);
-    if (!own) {  // (the APK's: SDL reads a relative path it doesn't find on disk from the assets)
+    free(buf);
+    if (!own) {  // (the APK's: SDL reads a relative path from the assets)
         char seed[64];
         snprintf(seed, sizeof seed, "pipe_seed_v%d.bin", g_game_version);
         buf = SDL_LoadFile(seed, &n);
@@ -8422,6 +8617,7 @@ static void warm_stats(void) {
     uint64_t now = plat_now_ns();
     if (warm_dirty && now - warm_saved_at > 30000000000ull) warm_save(), warm_saved_at = now;
     if (++calls % 5) return;
+    qt_stats();
     uint32_t p50 = 0, p95 = 0;
     if (w_nlead) {
         qsort(w_lead, (size_t)w_nlead, sizeof *w_lead, warm_cmp_u32);

@@ -1234,6 +1234,9 @@ static void create_swapchain(void) {
 
 static void recreate_swapchain(void) {
 #ifdef __ANDROID__
+    { extern void vk_qt_drain(void); vk_qt_drain(); }  // (exec.c: the queue thread's presents done with the old one)
+#endif
+#ifdef __ANDROID__
     WdMark wd_mark = vk_wd_enter(WD_R_SWAPCHAIN, 0);  // (freeze watchdog: vkDeviceWaitIdle waits for all the GPU's work)
 #endif
     vkDeviceWaitIdle(g_vk.dev);
@@ -1353,6 +1356,7 @@ static bool android_surface_ready(void) {  // false: no window to draw into now
     android_frame_rate(aw);
     if (aw == surface_aw && !surface_lost) return true;
     WdMark wd_mark = vk_wd_enter(WD_R_SWAPCHAIN, 1);  // (freeze watchdog)
+    { extern void vk_qt_drain(void); vk_qt_drain(); }  // (exec.c: the queue thread's work done first)
     vkDeviceWaitIdle(g_vk.dev);
     for (uint32_t i = 0; i < g_vk.sc_count; i++) vk_rp_forget_view(g_vk.sc_views[i]), vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
     g_vk.sc_count = 0;
@@ -1653,7 +1657,13 @@ void vk_frame_end(const char *shot_path) {
 #ifdef __ANDROID__
     WdMark wd_mark = vk_wd_enter(WD_R_QUEUE_PRESENT, present_id);  // (freeze watchdog)
 #endif
+#ifdef __ANDROID__
+    extern bool vk_qt_active(void);
+    extern VkResult vk_qt_present(const VkPresentInfoKHR *pi);
+    VkResult r = vk_qt_active() ? vk_qt_present(&pi) : vkQueuePresentKHR(g_vk.queue, &pi);  // (exec.c: the queue thread)
+#else
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+#endif
     DIAG_POP();
     if (pres_t0) diag_present_ns = SDL_GetTicksNS() - pres_t0;
     if (g_vk.display_timing && diag_want_gpu_ts()) {  // (while measuring: when the compositor really showed the images)
@@ -1842,6 +1852,7 @@ void backend_present(NvnTexture *t) {
 #ifdef __ANDROID__
     extern bool fg_use_now(void);  // (vulkan/framegen.c: Video > Frame generation, in play)
     bool fg = fg_use_now() && window_ready();
+    { extern void vk_qt_frame(bool framegen); vk_qt_frame(fg_use_now()); }  // (exec.c: the queue thread for this frame)
 #else
     bool fg = false;
 #endif
@@ -2636,6 +2647,7 @@ void backend_reset(void) {
     if (!g_vk.dev) return;
 #ifdef __ANDROID__
     vk_async_drain();
+    { extern void vk_qt_drain(void); vk_qt_drain(); }
 #endif
     vkDeviceWaitIdle(g_vk.dev);
     extern void vk_textures_reset(void);

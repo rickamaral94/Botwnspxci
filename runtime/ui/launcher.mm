@@ -628,6 +628,8 @@ static bool android_copy_document(const std::string &uri, const std::string &dst
 // (BOTWRecompAndroidActivity pickLogFolder / openLog), where a file manager can open it - Android/data/ is out of its reach
 extern "C" void android_log_file(bool on);
 extern "C" bool vk_adreno_8xx(const char *name);  // (Driver compatibility's Automatic: runtime/nvn/vulkan/device.c)
+extern "C" void vk_queue_hold(void);     // (vulkan/exec.c: the queue for the caller alone)
+extern "C" void vk_queue_release(void);
 extern "C" bool vk_lrz_auto(const char *name);    // (the LRZ's Automatic: the Adreno 8xx and the 740)
 extern "C" bool vk_inplace_reads_on(int setting); // (the in-place reads' Automatic: the Adreno 7xx and 8xx)
 extern "C" bool vk_turnip_heap_on(int setting);
@@ -2150,8 +2152,8 @@ static void prelaunch_tab(float sc) {
             ImGui::TextDisabled("%s", tr("In the next game session, records 60 s of gameplay once you have played 5 s out of "
                                          "the menus: where each frame's time goes (the game's threads, the GPU, the clocks). "
                                          "A line in the corner shows it. Play the same stretch as usual, then send the log. "
-                                         "Measure and compare: 120 s, the change being tested (now: Video > Early depth test) turned on "
-                                         "and off every 10 s, so both share the clocks and the heat."));
+                                         "Measure and compare: 120 s, the change being tested (now: Video > Queue thread, with frame "
+                                         "generation off) turned on and off every 10 s, so both share the clocks and the heat."));
         }
         ImGui::PopTextWrapPos();
         if (changed) settings_save();
@@ -2538,7 +2540,12 @@ extern "C" void launcher_run(const char *root) {
             next_frame = (on_time ? next_frame : now) + period;
             static const float clear_col[4] = {0.04f, 0.05f, 0.06f, 1};
             if (!vk_frame_begin(clear_col)) { SDL_Delay(16); continue; }
-            ImGui_ImplVulkan_NewFrame();
+            {   // (the font atlas's upload on the queue: the queue thread out of the way - vulkan/exec.c vk_queue_hold)
+                bool fonts = !ImGui::GetIO().Fonts->TexID;
+                if (fonts) vk_queue_hold();
+                ImGui_ImplVulkan_NewFrame();
+                if (fonts) vk_queue_release();
+            }
 #endif
             ImGui_ImplSDL3_NewFrame();
             // the backend (manual mode, no gamepads of its own) clears HasGamepad every frame, and ImGui then drops the

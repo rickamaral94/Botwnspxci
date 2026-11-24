@@ -27,6 +27,8 @@ extern "C" int fg_status(char *why, size_t n);       // (nvn/vulkan/framegen.c)
 #include "imgui_impl_metal.h"
 #else
 #include "imgui_impl_vulkan.h"
+extern "C" void vk_queue_hold(void);     // (vulkan/exec.c: the queue for the caller alone)
+extern "C" void vk_queue_release(void);
 extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
 extern "C" bool vk_low_ram(void);                // runtime/nvn/vulkan/exec.c: RAM saving as the app started
 extern "C" bool vk_low_ram_auto(long *total_mb); // (what Automatic picks on this device)
@@ -811,6 +813,10 @@ static void tab_display(void) {
                        "with Turnip. Applies the next time a save loads."))
             g_settings.pipe_prewarm = pi == 0 ? -1 : pi == 1 ? 1 : 0;
     }
+    opt_toggle("Queue thread (experimental)", &g_settings.queue_thread, false,
+               "Hands the GPU work and the finished images to a thread of their own, so the thread that turns the game's "
+               "drawing into GPU work doesn't wait for the screen to take each image. Not with frame generation on. An "
+               "experiment: \"Measure and compare\", on the start screen, tests it on and off. Applies at once.");
     opt_toggle("Pipeline warm-up", &g_settings.pipe_warm, true,
                "Keeps a list of the graphics pipelines made while you play and makes them again as soon as the game loads "
                "their shaders, before they are drawn: fewer stutters and fewer frames with things black or white the "
@@ -1588,7 +1594,13 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 #ifdef __APPLE__
     ImGui_ImplMetal_NewFrame(rp);
 #else
-    ImGui_ImplVulkan_NewFrame();
+    {   // (the backend uploads its font atlas on the queue here, once and after a rebuild: the queue thread out of the way -
+        // vulkan/exec.c vk_queue_hold)
+        bool fonts = !ImGui::GetIO().Fonts->TexID;
+        if (fonts) vk_queue_hold();
+        ImGui_ImplVulkan_NewFrame();
+        if (fonts) vk_queue_release();
+    }
 #endif
     ImGui::NewFrame();
 

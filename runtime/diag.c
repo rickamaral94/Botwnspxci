@@ -287,8 +287,9 @@ static int thermal_max = -1;
 static uint64_t g_move_cost_ns;
 // A/B (diag_request_ab): the feature alternates every 10 s in the window, so both sides share the clocks and the heat
 volatile int g_diag_ab = -1;
-// which feature: 0 the early depth tests (vulkan/exec.c early_z_on; Amaral.5), 1 the game's busiest threads in the ADPF
-// session (platform/android.c; LARECOMP_AB=adpf - measured 2026-10-30: no gain)
+// which feature (LARECOMP_COMPARE): 2 the queue thread (vulkan/exec.c qt_wanted; the default since Amaral.10, "queue"),
+// 3 the texture checks' helper thread (textures.c, "texhelper"), 0 the early depth tests (exec.c early_z_on, "early_z"),
+// 1 the game's busiest threads in the ADPF session (platform/android.c, "adpf" - also LARECOMP_AB=adpf; no gain, 30/10)
 int g_diag_ab_what = -1;
 static int g_ab_want;
 static uint64_t f_next_ab;
@@ -306,8 +307,9 @@ static void report_start(void);
 
 void diag_request_ab(int seconds) {
     if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
-    const char *what = getenv("LARECOMP_AB");
-    g_diag_ab_what = what && !strcmp(what, "adpf") ? 1 : 0;
+    const char *what = getenv("LARECOMP_COMPARE"), *ab = getenv("LARECOMP_AB");
+    g_diag_ab_what = what && !strcmp(what, "early_z") ? 0 : what && !strcmp(what, "adpf") ? 1 : what && !strcmp(what, "texhelper") ? 3
+                   : !what && ab && !strcmp(ab, "adpf") ? 1 : 2;
     g_ab_want = 1;
     diag_request(seconds);
 }
@@ -801,8 +803,10 @@ static void *report_main(void *arg) {
     stat_line("acquire (vkAcquireNextImageKHR), gameplay", f_acquire, f_n, f_flags, 1, 1);
     stat_line("present call (vkQueuePresentKHR), gameplay", f_present, f_n, f_flags, 1, 1);
     if (g_ab_want) {
-        out(g_diag_ab_what == 1 ? "-- A/B: the game's busiest threads in the ADPF session (on / off, alternating every 10 s; gameplay frames)"
-                                : "-- A/B: early depth tests, Video > Early depth test (on / off, alternating every 10 s; gameplay frames)");
+        static const char *ab_name[] = {"early depth tests, Video > Early depth test", "the game's busiest threads in the ADPF session",
+                                        "the queue thread, Video > Queue thread", "the texture checks' helper thread"};
+        out("-- A/B: %s (on / off, alternating every 10 s; gameplay frames)",
+            g_diag_ab_what >= 0 && g_diag_ab_what <= 3 ? ab_name[g_diag_ab_what] : "?");
         for (int a = 1; a >= 0; a--)
             if (ab_ns[a]) out("real frames a second with it %s: %.2f (%llu in %.1f s)", a ? "ON " : "OFF", ab_real[a] * 1e9 / ab_ns[a],
                               (unsigned long long)ab_real[a], ab_ns[a] / 1e9);

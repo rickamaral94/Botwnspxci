@@ -1008,6 +1008,9 @@ static bool tex_check_thread_on(void) {
     static int on = -1;
     if (on < 0) on = !getenv("LARECOMP_TEX_CHECK_THREAD") || atoi(getenv("LARECOMP_TEX_CHECK_THREAD"));
     extern int vk_ab(const char *what);
+    extern volatile int g_diag_ab;
+    extern int g_diag_ab_what;
+    if (g_diag_ab >= 0 && g_diag_ab_what == 3) return g_diag_ab == 1;  // (diag.c: Measure and compare, LARECOMP_COMPARE=texhelper)
     int ab = vk_ab("texhelper");
     return ab >= 0 ? ab == 1 : on;
 }
