@@ -55,6 +55,7 @@ typedef struct {
     int fg_flow;            // its flow scale: 0 100%, 1 75%, 2 50% (the motion estimated at that share of the size)
     bool fg_performance;    // its performance mode (LSFG 3.1P)
     bool fg_hud;            // the HUD kept sharp in the generated frames: the real frame's pixels where the HUD is (framegen.c)
+    bool fg_headroom;       // (Amaral.18) frames scheduled one output period later: a real frame a little late keeps its slot
     int fg_mult;            // its multiplier: 0 2x (30 -> 60), 1 3x (40 -> 120), 2 4x (30 -> 120)
     bool cbuf_inplace;      // Video > Constant buffers read in place (experimental; only with Sync lag off): vulkan/exec.c
     bool gcopy_range;       // Video > Vertex copy reuse (experimental): vulkan/exec.c; on/off in one build for A/B/A

@@ -376,11 +376,19 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
         // the compositor holds each until its time, and the render thread goes straight on to the next frame. The grid
         // follows the real frames: a slot already past, or more than two periods ahead (the queue would grow), starts
         // it again from now.
+        // (Amaral.18, Video > Frame generation smoothness, on by default: the grid one output period later. On the Odin the
+        // game's 30 fps frames came 2-10 ms late in ~5% (real frame p95 35.8, p99 43.9 ms), each a 33 ms hole on the
+        // screen (shown intervals p95 33.4 ms): a late frame found its slot past and the grid started again. With a
+        // period of headroom it still meets it; the input is ~17 ms later.)
         const uint64_t OUT_NS = 1000000000ull / (uint64_t)modes[mode_now()].out;
+        const uint64_t HEAD = g_settings.fg_headroom ? OUT_NS : 0;
         period = OUT_NS;
         uint64_t t_i = now + 2000000ull;
-        if (next_slot_ns > t_i && next_slot_ns - t_i < 2ull * OUT_NS) t_i = next_slot_ns;
-        else if (next_slot_ns && next_slot_ns > t_i) st_drop++;  // (behind: the grid starts over, no image skipped)
+        if (next_slot_ns > t_i && next_slot_ns - t_i < 2ull * OUT_NS + HEAD) t_i = next_slot_ns;
+        else {
+            if (next_slot_ns && next_slot_ns > t_i) st_drop++;  // (behind: the grid starts over, no image skipped)
+            t_i += HEAD;
+        }
         if (have_prev) {
             if (ts_pool) ts_write(vk_cmd(), tq + 1), ts_used[ts_i] = true;
             for (int i = 0; i < ctx_nout; i++) {  // (the generated frames in order, one slot each, then B)

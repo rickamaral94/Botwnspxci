@@ -1177,7 +1177,7 @@ static void create_swapchain(void) {
     extern bool fg_wants_fifo(void);
     extern int fg_queued_images(void);
     // (frame generation: its images of a real frame queued at once - 2 to 4)
-    uint32_t count = caps.minImageCount + 1 + (fg_wants_fifo() ? (uint32_t)fg_queued_images() - 1 : 0);
+    uint32_t count = caps.minImageCount + 1 + (fg_wants_fifo() ? (uint32_t)fg_queued_images() : 0);  // (Amaral.18: one more for the smoothness headroom, framegen.c)
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;  // (asked for: the driver may make more, up to VK_MAX_SWAP_IMAGES)
     if (count < caps.minImageCount) count = caps.minImageCount;

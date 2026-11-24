@@ -870,6 +870,10 @@ static void tab_display(void) {
                        "Keeps the game's HUD (hearts, map, text) sharp in the generated frames: where it is, they show the real "
                        "frame's pixels instead of the interpolated ones, which bend and smear it. Costs the GPU about 1 ms a "
                        "frame. Applies at once.");
+            opt_toggle("Frame generation smoothness", &g_settings.fg_headroom, true,
+                       "Shows each frame one refresh later, so a game frame that comes a few milliseconds late still keeps "
+                       "its place on the screen instead of leaving a hole (a short stutter). Adds about 17 ms of input delay. "
+                       "Applies at once.");
         }
         if (st == 1 && opt_button("Remove shaders", "Deletes the shaders translated from your Lossless.dll."))
             lsfg_remove();

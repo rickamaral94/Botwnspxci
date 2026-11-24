@@ -67,6 +67,7 @@ Settings g_settings = {
     .fg_flow = 2,
     .fg_performance = false,
     .fg_hud = true,
+    .fg_headroom = true,
     .fg_mult = 0,
     .cbuf_inplace = false,
     .gcopy_range = false,
@@ -254,6 +255,7 @@ void settings_reset_defaults(void) {
     g_settings.fg_flow = d->fg_flow;
     g_settings.fg_performance = d->fg_performance;
     g_settings.fg_hud = d->fg_hud;
+    g_settings.fg_headroom = d->fg_headroom;
     g_settings.fg_mult = d->fg_mult;
     g_settings.cbuf_inplace = d->cbuf_inplace;
     g_settings.gcopy_range = d->gcopy_range;
@@ -321,6 +323,7 @@ void settings_load(void) {
         else if (!strcmp(key, "framegen_flow")) g_settings.fg_flow = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 2;
         else if (!strcmp(key, "framegen_performance")) g_settings.fg_performance = atoi(val) != 0;
         else if (!strcmp(key, "framegen_hud_mask")) g_settings.fg_hud = atoi(val) != 0;
+        else if (!strcmp(key, "framegen_headroom")) g_settings.fg_headroom = atoi(val) != 0;
         else if (!strcmp(key, "framegen_multiplier")) g_settings.fg_mult = atoi(val) == 3 ? 1 : atoi(val) == 4 ? 2 : 0;
         else if (!strcmp(key, "cbuf_inplace")) g_settings.cbuf_inplace = atoi(val) != 0;
         else if (!strcmp(key, "gcopy_range")) g_settings.gcopy_range = atoi(val) != 0;
@@ -457,6 +460,7 @@ void settings_save(void) {
     fprintf(f, "framegen = %d\nframegen_flow = %d\nframegen_performance = %d\nframegen_multiplier = %d\nframegen_hud_mask = %d\n"
             "cbuf_inplace = %d\n", g_settings.framegen, g_settings.fg_flow, g_settings.fg_performance, g_settings.fg_mult + 2,
             g_settings.fg_hud, g_settings.cbuf_inplace);
+    fprintf(f, "framegen_headroom = %d\n", g_settings.fg_headroom ? 1 : 0);
     fprintf(f, "shader_int32 = %d\nsync_lag = %d\nnative_code = %d\nfiles_in_place = %d\n", g_settings.shader_int32,
             g_settings.sync_lag, g_settings.native_code, g_settings.files_in_place);
     fprintf(f, "gcopy_range = %d\n", g_settings.gcopy_range);
