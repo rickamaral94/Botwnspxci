@@ -95,6 +95,9 @@ static void *tjob_worker(void *arg) {
     }
 }
 
+// (jobs the workers ran themselves: on a 2-core runner the main thread can steal and run every one first, and then no
+// worker goes idle after a job - the queue is right, there is just no idle event to see; GitHub Actions, 24/11)
+static atomic_int worker_runs;
 static void *race_worker(void *arg) {
     RaceCtx *ctx = (RaceCtx *)arg;
     for (;;) {
@@ -111,6 +114,7 @@ static void *race_worker(void *arg) {
         pthread_mutex_unlock(ctx->lock);
         j->fn(j->arg);
         free(j);
+        atomic_fetch_add(&worker_runs, 1);
         if (mw_job_finish(ctx->lock, ctx->head, ctx->active)) {
             pthread_mutex_lock(ctx->done_lock);
             (*ctx->q_idle_events)++;
@@ -263,7 +267,7 @@ int main(void) {
         if (both_idle) break;
         pthread_cond_wait(&dcond, &dlock);
     }
-    assert(q_idle_events > 0);
+    assert(q_idle_events > 0 || atomic_load(&worker_runs) == 0);
     pthread_mutex_unlock(&dlock);
 
     pthread_mutex_lock(&lock);
