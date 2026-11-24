@@ -2896,9 +2896,9 @@ static int lz_nimg, lz_on = -1;
 static const void *lz_tex;     // (the pass's depth target; NULL: none / not tracked)
 static bool lz_valid, lz_kill_after;  // (lz_kill_after: a clear of part of the image - invalid after the pass)
 static int lz_dir;             // 0 unknown, 1 LESS*, 2 GREATER*
-static uint32_t lz_ndraw, lz_pw, lz_ph, lz_iw, lz_ih;
-static uint64_t lz_passes, lz_passes_valid, lz_inv[LZ_NR];
-static struct { uint64_t fs, vs; uint32_t reason, w, h, at, n; } lz_top[24];
+static uint32_t lz_ndraw, lz_pw, lz_ph, lz_iw, lz_ih, lz_verts;
+static uint64_t lz_passes, lz_passes_valid, lz_inv[LZ_NR], lz_fs_nowrite;  // (fs depth / store ones without a depth write: the Turnip agent's lab question)
+static struct { uint64_t fs, vs; uint32_t reason, w, h, at, n, verts; } lz_top[24];  // (verts: the draw's count - 3 or 4: a full-screen one, a clear by a draw?)
 static int lz_ntop;
 static int lz_find(const void *t) {
     for (int i = 0; i < lz_nimg; i++) if (lz_img[i].tex == t) return i;
@@ -2935,7 +2935,7 @@ static void lz_invalidate(int reason, uint64_t fs, uint64_t vs_code) {
         if (lz_ntop == 24) return;
         lz_ntop++;
         lz_top[i].fs = fs, lz_top[i].vs = vs, lz_top[i].reason = (uint32_t)reason, lz_top[i].w = lz_pw, lz_top[i].h = lz_ph,
-        lz_top[i].at = lz_ndraw, lz_top[i].n = 0;
+        lz_top[i].at = lz_ndraw, lz_top[i].n = 0, lz_top[i].verts = lz_verts;
     }
     lz_top[i].n++;
 }
@@ -2944,7 +2944,10 @@ static void lz_draw(bool dt, bool dw, VkCompareOp op, bool fs_depth, bool fs_sto
     if (!lz_tex) return;
     lz_ndraw++;
     if (!dt) return;  // (no depth test: LRZ only skipped for it)
-    if ((fs_depth || fs_store) && !lz_dir) lz_invalidate(fs_depth ? LZ_FS_DEPTH : LZ_FS_STORE, fs, vs);
+    if ((fs_depth || fs_store) && !lz_dir) {
+        if (lz_valid && !dw) lz_fs_nowrite++;  // (Turnip invalidates there even without a depth write - a skip would do)
+        lz_invalidate(fs_depth ? LZ_FS_DEPTH : LZ_FS_STORE, fs, vs);
+    }
     if (!dw) return;
     if (op == VK_COMPARE_OP_ALWAYS || op == VK_COMPARE_OP_NOT_EQUAL) {
         lz_invalidate(clear_draw ? LZ_CLEAR_DRAW : LZ_ALWAYS, fs, vs);
@@ -2968,15 +2971,17 @@ static int lz_cmp(const void *a, const void *b) {
 static void lz_stats(void) {
     if (!lz_enabled() || !lz_passes) return;
     LOG("[lrz] 10 s: %llu passes with depth, %llu begun with LRZ valid (predicted, Turnip's rules); made invalid by: always %llu, "
-        "fs depth %llu, fs store %llu, direction %llu, small clear %llu, our clear draws %llu\n", (unsigned long long)lz_passes,
+        "fs depth %llu, fs store %llu (of those without a depth write %llu), direction %llu, small clear %llu, our clear draws %llu\n",
+        (unsigned long long)lz_passes,
         (unsigned long long)lz_passes_valid, (unsigned long long)lz_inv[LZ_ALWAYS], (unsigned long long)lz_inv[LZ_FS_DEPTH],
-        (unsigned long long)lz_inv[LZ_FS_STORE], (unsigned long long)lz_inv[LZ_DIR], (unsigned long long)lz_inv[LZ_CLEAR_AREA],
+        (unsigned long long)lz_inv[LZ_FS_STORE], (unsigned long long)lz_fs_nowrite, (unsigned long long)lz_inv[LZ_DIR], (unsigned long long)lz_inv[LZ_CLEAR_AREA],
         (unsigned long long)lz_inv[LZ_CLEAR_DRAW]);
     qsort(lz_top, (size_t)lz_ntop, sizeof lz_top[0], lz_cmp);
     for (int i = 0; i < lz_ntop && i < 6; i++)
-        LOG("[lrz]   %u x: %s - fs %016llx vs %016llx, pass %ux%u, at draw %u\n", lz_top[i].n, lz_rname[lz_top[i].reason],
-            (unsigned long long)lz_top[i].fs, (unsigned long long)lz_top[i].vs, lz_top[i].w, lz_top[i].h, lz_top[i].at);
-    lz_passes = lz_passes_valid = 0, memset(lz_inv, 0, sizeof lz_inv), lz_ntop = 0;
+        LOG("[lrz]   %u x: %s - fs %016llx vs %016llx, pass %ux%u, at draw %u, %u vertices\n", lz_top[i].n,
+            lz_rname[lz_top[i].reason], (unsigned long long)lz_top[i].fs, (unsigned long long)lz_top[i].vs, lz_top[i].w, lz_top[i].h,
+            lz_top[i].at, lz_top[i].verts);
+    lz_passes = lz_passes_valid = lz_fs_nowrite = 0, memset(lz_inv, 0, sizeof lz_inv), lz_ntop = 0;
 }
 static void vk_end_pass_at(int line);
 static void save_texture_raw(TexBackend *b, const char *path);
@@ -3614,6 +3619,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     ss_forget();  // (its own pipeline and state: the next draw sets everything again)
     dyn_defaults(cb);
     if (depth) { vkCmdSetDepthTestEnable(cb, VK_TRUE); vkCmdSetDepthWriteEnable(cb, VK_TRUE); }
+    lz_verts = 3;
     lz_draw(depth, depth, VK_COMPARE_OP_ALWAYS, false, false, 0, 0, true);
     if (stencil) {
         vkCmdSetStencilTestEnable(cb, VK_TRUE);
@@ -9618,6 +9624,7 @@ static void draw_(CmdRec *r, bool indexed) {
 
     // ---- depth / stencil (dynamic; without extended dynamic state the calls but the masks' do nothing - device.c - and
     // the pipeline has them, PipeKey.fx)
+    lz_verts = (uint32_t)r->x[2];
     lz_draw(dt, dw, dop, pr->fi->writes_depth, pr->fi->uses_gmem_store, g_cur_fs_hash, st.program ? st.program->stages[0].code_addr : 0, false);
     if (ss_need(SS_DT, ss.dt == (VkBool32)dt)) { ss.dt = dt; vkCmdSetDepthTestEnable(cb, dt); }
     if (ss_need(SS_DW, ss.dw == dw)) { ss.dw = dw; vkCmdSetDepthWriteEnable(cb, dw); }

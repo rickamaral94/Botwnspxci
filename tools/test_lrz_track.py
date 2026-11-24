@@ -63,6 +63,7 @@ int main(void) {
     lz_stats();
     CHECK(strstr(logbuf, "[lrz] 10 s: 10 passes with depth") != NULL);
     CHECK(strstr(logbuf, "fs 0000000000000005") != NULL);
+    CHECK(strstr(logbuf, "(of those without a depth write 1)") != NULL);  // (draw 5: the FS writes depth, no depth write)
     if (fails) { fputs(logbuf, stderr); return 1; }
     printf("lrz prediction: 9 cases, the 10 s line and its draws\n");
     return 0;
