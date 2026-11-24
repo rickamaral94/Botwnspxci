@@ -14,6 +14,8 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [Amaral.5, 19/11](2026-11-19-amaral5.md) | Host, APK 43 | Upstream 0.4.7 (fence por submissão, vertex input dinâmico, pré-aquecimento do upstream no lugar do nosso); do GTA V: teste de profundidade antecipado, logs de desempenho, GPU por tipo de passe, release por CI. Testes no Odin pendentes. |
 | [Amaral.6, 20/11](2026-11-20-amaral6.md) | Host, APK 44 | Travadas de primeira passagem: pré-aquecimento do upstream em Automático (ligado com o Turnip), teste antecipado desligado (o Turnip já faz EARLY_Z), classificação dos pipelines para decidir o pipeline library. Decidido com o agente do Turnip. |
 | [Amaral.7, 24/11](2026-11-24-amaral7.md) | Host, APK 45 | Upstream 0.4.11 (slots de textura: +20% num Adreno 750; a janela de constant buffers sai do Odin). Chaves para isolar a água branca e o cabelo preto; A/B do `invariant`; avaliação dos outros ports. |
+| [Amaral.8, 24/11](2026-11-24-amaral8.md) | Host, APK 46 | Leitura direta dos alvos no Automático da 740 (as cópias eram 17 de 38,5 ms por quadro); pré-aquecimento pela lista de volta, com a lista distribuída no APK. |
+| [Ports de Switch para Android, 24/11](2026-11-24-ports-android.md) | Avaliação | totk-android (mesmo SoC do Odin), TOTKDroid, Peanuts Native (GPL: só ideias): 12 técnicas por ordem de ganho. |
 
 ## Revisões externas e Turnip
 

@@ -629,6 +629,7 @@ static bool android_copy_document(const std::string &uri, const std::string &dst
 extern "C" void android_log_file(bool on);
 extern "C" bool vk_adreno_8xx(const char *name);  // (Driver compatibility's Automatic: runtime/nvn/vulkan/device.c)
 extern "C" bool vk_lrz_auto(const char *name);    // (the LRZ's Automatic: the Adreno 8xx and the 740)
+extern "C" bool vk_inplace_reads_on(int setting); // (the in-place reads' Automatic: the Adreno 7xx and 8xx)
 extern "C" bool vk_turnip_heap_on(int setting);
 extern "C" bool vk_turnip_heap_ram_off(void);  // (an Adreno 6xx with 8 GB or less: #520)
 extern "C" bool vk_lrz_at_start(void);
@@ -2029,7 +2030,6 @@ static void prelaunch_tab(float sc) {
     {   // (runtime/settings.h gpu_heap / inplace_reads / turnip_lrz / log_file: for GPUs where a Turnip path draws wrong;
         // LASRecompAndroid's, with BOTW's in-place reads of draw targets)
         bool changed = false;
-        const bool a8 = vk_adreno_8xx(vk_gpu_name());  // (Automatic: on for Adreno 8xx only)
         const bool lrz_auto = vk_lrz_auto(vk_gpu_name());  // (the LRZ's: the 740 too)
         auto tri = [&](const char *id, int *v, bool auto_on) {  // Automatic / On / Off: -1 / 1 / 0; auto_on: Automatic's choice
             bool ch = false;
@@ -2072,10 +2072,10 @@ static void prelaunch_tab(float sc) {
             ImGui::TextDisabled("%s", tr("This driver can't export its memory: the option does nothing here."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Draw-target reads in place"));
-        changed |= tri("inplace", &g_settings.inplace_reads, a8);
+        changed |= tri("inplace", &g_settings.inplace_reads, vk_inplace_reads_on(-1));  // (device.c: 7xx and 8xx)
         ImGui::TextDisabled("%s", tr("On: decals and effects read the image they draw on as it is, the fastest way. Off: a copy "
-                                  "of it each time, slower (fewer fps) but by the Vulkan rules. Automatic: on for Adreno 8xx "
-                                  "GPUs, off for the others. Applies when the game starts."));
+                                  "of it each time, slower (fewer fps) but by the Vulkan rules. Automatic: on for Adreno 7xx and "
+                                  "8xx GPUs, off for the others. Applies when the game starts."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Turnip low-resolution Z (LRZ)"));
         changed |= tri("lrz", &g_settings.turnip_lrz, lrz_auto);

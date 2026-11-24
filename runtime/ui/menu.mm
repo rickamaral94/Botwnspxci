@@ -811,6 +811,11 @@ static void tab_display(void) {
                        "with Turnip. Applies the next time a save loads."))
             g_settings.pipe_prewarm = pi == 0 ? -1 : pi == 1 ? 1 : 0;
     }
+    opt_toggle("Pipeline warm-up", &g_settings.pipe_warm, true,
+               "Keeps a list of the graphics pipelines made while you play and makes them again as soon as the game loads "
+               "their shaders, before they are drawn: fewer stutters and fewer frames with things black or white the "
+               "first time through a place. The app brings a list from the developer's own sessions, so a first game "
+               "has it too. Applies at once.");
     opt_toggle("Switch-style core turns (experimental)", &g_settings.core_turns, false,
                "The game's threads that share a CPU core take turns, as on the Switch, on cores 0 to 2 instead of only "
                "core 0. Try it if the game freezes after a few minutes, mostly in fights with many effects (#401). An "

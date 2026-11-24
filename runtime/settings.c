@@ -84,6 +84,7 @@ Settings g_settings = {
     .early_z = false,
     .perf_log = 0,
     .core_turns = false,        // (an experiment for #401: kernel.c core0_init)
+    .pipe_warm = true,          // (Amaral.8: vulkan/exec.c's pipeline warm-up)
     .sync_lag = true,           // (a few more fps; the CPU's reads of GPU results a frame old: nvn/objects.c nvnSyncWait)
     .out_lines = OUT_AUTO,      // (POCO F7 Ultra, 3200x1440, 1.8.2's Great Plateau: GPU 22.8 ms a frame at the screen's,
                                 // 18.6 at 1080 lines with a larger scene - the final image's passes over 2.2x the pixels)
@@ -264,6 +265,7 @@ void settings_reset_defaults(void) {
     g_settings.early_z = d->early_z;
     g_settings.perf_log = d->perf_log;
     g_settings.core_turns = d->core_turns;
+    g_settings.pipe_warm = d->pipe_warm;
     g_settings.files_in_place = d->files_in_place;
 #endif
 }
@@ -331,6 +333,8 @@ void settings_load(void) {
         // (early_depth_test, Amaral.5's key, is ignored: it saved its default 1 - Amaral.6's default is off)
         else if (!strcmp(key, "perf_log")) g_settings.perf_log = atoi(val) < 0 || atoi(val) > 2 ? 0 : atoi(val);
         else if (!strcmp(key, "core_turns")) g_settings.core_turns = atoi(val) != 0;
+        else if (!strcmp(key, "pipeline_warmup2")) g_settings.pipe_warm = atoi(val) != 0;
+        // (pipeline_warmup, Amaral.3 / .4's key, is ignored: it saved its default 0 - Amaral.8's default is on)
         else if (!strcmp(key, "files_in_place")) g_settings.files_in_place = atoi(val) != 0;
         else if (!strcmp(key, "gpu_heap")) g_settings.gpu_heap = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "low_ram")) g_settings.low_ram = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
@@ -458,6 +462,7 @@ void settings_save(void) {
     fprintf(f, "early_z = %d\n", g_settings.early_z ? 1 : 0);
     fprintf(f, "perf_log = %d\n", g_settings.perf_log);
     fprintf(f, "core_turns = %d\n", g_settings.core_turns ? 1 : 0);
+    fprintf(f, "pipeline_warmup2 = %d\n", g_settings.pipe_warm ? 1 : 0);
     static const char *const tri[] = {"auto", "0", "1"};  // (-1 / 0 / 1)
 #define TRI(v) tri[(v) < 0 ? 0 : (v) ? 2 : 1]
     fprintf(f, "gpu_heap = %s\ninplace_reads = %s\nturnip_lrz = %s\nlog_file = %d\ngpu_model = %s\n", TRI(g_settings.gpu_heap),

@@ -6,6 +6,9 @@
 - G-buffer alias (view_overlaps_rt, alias_case): what counts as the draw's own target, and the case left out - a target
   at a level / layer other than 0 sampled by a view covering it (Amaral.3, the [alias] counter);
 
+- pipeline warm-up list (Amaral.8, warm_parse / warm_add): a list of another game version, key layout or size is
+  dropped; a repeated entry is kept once.
+
 (Amaral.5: the compute cache, the shader / pipeline wait and the warm-up list gave way to upstream 0.4.7's object
 cache, job queue and prewarm, tested by tools/test_object_cache.c, test_shader_job_queue.c, test_pipeline_prewarm.c.)
 
@@ -32,6 +35,8 @@ ranges = cut('typedef struct { uint64_t lo, hi; bool store, learned; } GcRange;'
     cut('#define GA_NRES ', '} GaRes;') + '} GaRes;\n'
 learn = cut('#define GL_LEGACY_MAX', '// Load-only arena copies')
 alias = cut('static bool view_overlaps_rt(', 'static bool is_attachment_entry(')
+wtypes = cut('typedef struct {\n    uint64_t vsh, fsh;', 'static bool warm_dirty;')
+wfuncs = cut('static uint32_t warm_slot(', 'static int warm_read(')
 
 HARNESS = r'''
 #include <pthread.h>
@@ -114,10 +119,51 @@ static void test_alias(void) {
     CHECK(stat_alias == 1);
 }
 
+/* ---- pipeline warm-up list (Amaral.8: it ships in the APK, so a list of another version or layout must be dropped) */
+typedef struct { uint8_t b[88]; } ShaderKey;
+typedef struct { void *prog; uint8_t b[600]; } PipeKey;
+static int g_game_version = 182;
+@WTYPES@
+@WFUNCS@
+static void test_warm(void) {
+    static unsigned char buf[sizeof(WarmHeader) + 3 * sizeof(WarmEntry)];
+    WarmHeader want, h;
+    warm_header(&want);
+    CHECK(!memcmp(want.magic, "BOTWPW2", 8) && want.entry_size == sizeof(WarmEntry) && want.game_version == 182);
+    h = want;
+    h.count = 3;
+    memcpy(buf, &h, sizeof h);
+    uint32_t n = 99;
+    CHECK(warm_parse(buf, sizeof buf, &want, &n) == buf + sizeof h && n == 3);
+    CHECK(!warm_parse(buf, sizeof buf - 1, &want, &n) && n == 0);        /* (cut short) */
+    WarmHeader bad[6];
+    for (int i = 0; i < 6; i++) bad[i] = h;
+    bad[0].magic[0] = 'X'; bad[1].game_version = 160; bad[2].entry_size += 8; bad[3].skey_size += 8;
+    bad[4].pkey_size += 8; bad[5].count = WARM_MAX + 1;
+    for (int i = 0; i < 6; i++) {
+        memcpy(buf, &bad[i], sizeof bad[i]);
+        CHECK(!warm_parse(buf, sizeof buf, &want, &n));
+    }
+    /* entries: a repeat is not added twice; two pairs with the same shaders chain under one slot */
+    warm_list = calloc(WARM_MAX, sizeof *warm_list), warm_next = calloc(WARM_MAX, sizeof *warm_next);
+    WarmEntry e;
+    memset(&e, 0, sizeof e);
+    e.vsh = 0x1111, e.fsh = 0x2222;
+    warm_add(&e); warm_add(&e);
+    CHECK(warm_n == 1);
+    e.pk.b[0] = 1;
+    warm_add(&e);
+    CHECK(warm_n == 2);
+    int found = 0;
+    for (int i = warm_index[warm_slot(0x1111, 0x2222)] - 1; i >= 0; i = warm_next[i] - 1) found++;
+    CHECK(found == 2);
+}
+
 int main(int argc, char **argv) {
     const char *what = argc > 1 ? argv[1] : "";
     if (!strcmp(what, "learn")) test_learn(getenv("LARECOMP_GRES_LEGACY") != NULL);
     else if (!strcmp(what, "alias")) test_alias();
+    else if (!strcmp(what, "warm")) test_warm();
     else return 2;
     printf("%s%s: %s\n", what, getenv("LARECOMP_GRES_LEGACY") ? " (opt-in)" : "",
            failed ? "FAILED" : "ok");
@@ -131,7 +177,7 @@ def main():
     if not cc:
         print('no C compiler')
         return 1
-    src = HARNESS.replace('@RANGES@', ranges).replace('@LEARN@', learn).replace('@ALIAS@', alias)
+    src = HARNESS.replace('@RANGES@', ranges).replace('@LEARN@', learn).replace('@ALIAS@', alias).replace('@WTYPES@', wtypes).replace('@WFUNCS@', wfuncs)
     with tempfile.TemporaryDirectory() as d:
         c, exe = pathlib.Path(d, 'exec_caches.c'), pathlib.Path(d, 'exec_caches')
         c.write_text(src)
@@ -143,7 +189,7 @@ def main():
         if r.returncode:
             print(r.stderr)
             return 1
-        runs = [('learn', {}), ('learn', {'LARECOMP_GRES_LEGACY': '1'}), ('alias', {})]
+        runs = [('learn', {}), ('learn', {'LARECOMP_GRES_LEGACY': '1'}), ('alias', {}), ('warm', {})]
         bad = 0
         for what, env in runs:
             e = {k: v for k, v in os.environ.items() if k != 'LARECOMP_GRES_LEGACY'}

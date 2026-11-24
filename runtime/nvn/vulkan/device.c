@@ -2312,6 +2312,17 @@ static int adreno_number(const char *name) {
     while (*a && (*a < '0' || *a > '9')) a++;
     return atoi(a);
 }
+// inplace_reads' Automatic (exec.c resolve_feedback): Turnip on an Adreno 7xx or 8xx. The 7xx since Amaral.8: on the
+// Odin 2 (Adreno 740, turnip_amaral v5.9.19.1, 24/11) the copies were 17 of 38.5 ms of GPU a frame and the 30 -> 60 of
+// frame generation didn't hold; in place, none and it held, no stripes on the terrain (the owner's look, Great Plateau).
+// TOTKDroid did the same for the 7xx (12a6d69, their #48: "much smoother" on a 740). Issue #129's stripes were an
+// Adreno 750 under another Turnip (0.2.5): Driver compatibility's Off is the way back.
+static int adreno_number(const char *name);
+bool vk_inplace_reads_on(int setting) {
+    if (setting >= 0) return setting != 0;
+    int n = adreno_number(g_vk.props.deviceName);
+    return n >= 700 && n < 900;
+}
 bool vk_turnip_heap_ram_off(void) {  // (also the start screen's note under the setting)
     int n = adreno_number(g_vk.props.deviceName);
     if (n < 600 || n >= 700) return false;

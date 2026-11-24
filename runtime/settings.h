@@ -71,6 +71,8 @@ typedef struct {
                           // it makes are programs to build
     int pipe_prewarm;     // Android: recorded graphics pipelines built while a save loads (vulkan/exec.c prewarm_enabled):
                           // -1 automatic (on with Turnip - Amaral.6: the first-sight pipelines were the stutters), 1 on, 0 off
+    bool pipe_warm;       // Android: Video > Pipeline warm-up - the pipelines of this phone's list (and the APK's seed) made
+                          // when the game sets their shaders (vulkan/exec.c warm_on; on by default since Amaral.8)
     bool core_turns;      // Android: the threads of each core take turns, not only core 0's (kernel.c core0_init: mask 7,
                           // as LARECOMP_CORE_LOCKS=7, which overrides it; #401; experimental, off by default)
     bool files_in_place;  // Android: a setup reads the picked romfs/ where it is, no copy (services/fs.c); off by default
