@@ -353,6 +353,12 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
     hud_w = b->width, hud_h = b->height;
     VkImageView hud = g_settings.fg_hud ? vk_fg_hud_mask(cb, b, e, vx, vy, vw, vh, pv) : VK_NULL_HANDLE;
     if (hud) st_hud++;
+    {   // (Amaral.14: the per-pass table's next row - the framegen's own generation, on its command buffers, and the queue
+        // between - was counted under "framegen: HUD mask": 2.8 ms there, the mask at half the size 2.7, with the
+        // framegen's own ~2.1 ms in it)
+        extern void vk_gp_note(VkCommandBuffer cb, const char *what);
+        vk_gp_note(cb, "framegen: generation (LSFG) and the queue between");
+    }
     ts_write(cb, tq);
     void renderer_submit(void);
     renderer_submit();  // (ours first on the queue; the framegen's next)
