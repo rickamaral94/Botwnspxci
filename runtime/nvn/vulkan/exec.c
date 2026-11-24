@@ -2886,7 +2886,8 @@ void vk_dump_watch_frame(void) {
 // fix for gpu-direction-tracking case"); a depth write against the pass's direction; a clear of a smaller area than the
 // image. The Odin's GPU trace (Amaral.14) read LRZ DISABLED in every depth pass, 19,646 "ALWAYS/NOT_EQUAL" and 18,006
 // "FS writes depth or has side-effects" in 46 s. This mirrors those rules per depth target to say which draws do it -
-// their shaders, pass and place - every 10 s ([lrz]); nothing is changed by it. LARECOMP_LRZ_TRACK=0: off.
+// their shaders, pass and place - every 10 s ([lrz]) while a measurement records; nothing is changed by it.
+// LARECOMP_LRZ_TRACK=1: always, 0: never.
 enum { LZ_ALWAYS, LZ_FS_DEPTH, LZ_FS_STORE, LZ_DIR, LZ_CLEAR_AREA, LZ_CLEAR_DRAW, LZ_NR };
 static const char *const lz_rname[LZ_NR] = {"depth write + ALWAYS/NOT_EQUAL", "first depth-tested draw's FS writes depth",
                                             "first depth-tested draw's FS stores to memory", "depth write against the pass's direction",
@@ -2905,9 +2906,9 @@ static int lz_find(const void *t) {
     if (lz_nimg < 16) { lz_img[lz_nimg].tex = t, lz_img[lz_nimg].valid = 0; return lz_nimg++; }
     return 15;  // (more than 16 depth targets: the last slot shared)
 }
-static bool lz_enabled(void) {
-    if (lz_on < 0) lz_on = !getenv("LARECOMP_LRZ_TRACK") || atoi(getenv("LARECOMP_LRZ_TRACK"));
-    return lz_on;
+static bool lz_enabled(void) {  // (only while "Measure performance" records, unless LARECOMP_LRZ_TRACK=1 / 0 says)
+    if (lz_on < 0) lz_on = getenv("LARECOMP_LRZ_TRACK") ? atoi(getenv("LARECOMP_LRZ_TRACK")) != 0 : 2;
+    return lz_on == 2 ? diag_want_gpu_ts() : lz_on;
 }
 // (begin_pass) the pass's depth: cleared by its load operation (over w x h of the image's iw x ih) or loaded
 static void lz_begin(const void *tex, bool clear, uint32_t w, uint32_t h, uint32_t iw, uint32_t ih) {

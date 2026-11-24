@@ -26,6 +26,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [Amaral.15, 24/11](2026-11-24-amaral15.md) | host, APK 53 (candidata, sem release) | A queda sustentada é da GPU (31–33 ms por quadro real com 5 mil draws; CPUs 15–21 ms). Telemetria por quadro real com CSV e bytes por origem; UBWC nos alvos de cor no Turnip 7xx (lista de formatos). A/B/A no Odin pendente. |
 | [Amaral.16, 24/11](2026-11-24-amaral16.md) | host + traces, APK 54 (candidata) | O LRZ está desligado em 100% dos passes com depth (trace). Regras do Turnip lidas no código da versão do Odin; previsão por draw (`[lrz]`) para achar quem o invalida. Nenhuma mudança na imagem. |
 | [Amaral.17, 24/11](2026-11-24-amaral17.md) | host, APK 55 (candidata) | As linhas `[lrz]` separam as invalidações de FS sem escrita de depth (pedido do agente do Turnip para um lab) e trazem a contagem de vértices dos draws, para achar clears por draw do jogo. |
+| [Release Amaral.17, 24/11](2026-11-24-release-amaral17.md) | release (não pre-release), APK 55 | A versão para jogar: as melhorias medidas ligadas, os experimentos sem ganho desligados, as medições só durante "Medir desempenho", e a configuração recomendada no Odin. |
 
 ## Revisões externas e Turnip
 

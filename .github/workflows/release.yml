@@ -19,6 +19,10 @@ on:
         description: "Aviso no início das notas (ex.: candidata de teste, não validada no aparelho)"
         required: false
         default: ""
+      prerelease:
+        description: "Pre-release (false: release normal, a versão para jogar)"
+        required: false
+        default: "true"
 
 permissions:
   contents: write
@@ -144,10 +148,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
           NOTE: ${{ inputs.note }}
+          PRE: ${{ inputs.prerelease }}
         run: |
           BODY="BOTWDroid Amaral $TAG. Nenhum arquivo do jogo incluído: use os seus. Certificado SHA-256 em docs/SIGNING-AMARAL.md; confira com SHA256SUMS."
           if [ -n "$NOTE" ]; then BODY="$NOTE
 
           $BODY"; fi
-          gh release create "$TAG" out/*.apk out/*.gz out/SHA256SUMS --prerelease --target "$GITHUB_SHA" --title "$TAG" \
+          KIND=--prerelease
+          if [ "$PRE" = "false" ]; then KIND=--latest; fi
+          gh release create "$TAG" out/*.apk out/*.gz out/SHA256SUMS "$KIND" --target "$GITHUB_SHA" --title "$TAG" \
             --notes "$BODY"

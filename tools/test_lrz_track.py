@@ -24,11 +24,12 @@ typedef enum { VK_COMPARE_OP_NEVER, VK_COMPARE_OP_LESS, VK_COMPARE_OP_EQUAL, VK_
 static char logbuf[8192]; static size_t logn;
 #define LOG(...) (logn += (size_t)snprintf(logbuf + logn, sizeof logbuf - logn, __VA_ARGS__))
 static uint64_t hmix(uint64_t h, const void *p, size_t n) { (void)p; return h ^ n; }
+static bool diag_want_gpu_ts(void) { return true; }  // (a measurement recording: the tracker on)
 ''' + mod + r'''
 static int fails;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 int main(void) {
-    int depthA, depthB;
+    static int depthA, depthB;
     const void *A = &depthA, *B = &depthB;
     // a load of a never-cleared image: invalid
     lz_begin(A, false, 1600, 900, 1600, 900); CHECK(!lz_valid); lz_end();
