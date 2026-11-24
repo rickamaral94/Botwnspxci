@@ -827,7 +827,7 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
                 static long nlog = -2;
                 static int64_t t_first;
                 if (nlog == -2) nlog = getenv("LARECOMP_LOG_GPU_TS") ? atol(getenv("LARECOMP_LOG_GPU_TS")) : 0;
-                if (nlog > 0) {
+                if (nlog > 0 && diag_want_gpu_ts()) {  // (from the measurement's start: in play, not the start screen)
                     if (!t_first) t_first = s0;
                     nlog--;
                     int64_t add = s1 > s0 ? s1 - (s0 > last_end ? s0 : last_end > s1 ? s1 : last_end) : 0;

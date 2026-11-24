@@ -287,6 +287,10 @@ static int thermal_max = -1;
 static uint64_t g_move_cost_ns;
 // A/B (diag_request_ab): the feature alternates every 10 s in the window, so both sides share the clocks and the heat
 volatile int g_diag_ab = -1;
+// (Amaral.11) the A/B's first 10 s left out of both sides: on the Odin a load's frames at ~150 a second fell into the
+// first ON block and made the queue thread look +47% (24/11) - its frames flagged 8, its time and clocks not counted
+static bool ab_warm;
+static uint64_t ab_on_frames, ab_on_active;  // (the queue thread's A/B: ON gameplay frames, and those it really ran in)
 // which feature (LARECOMP_COMPARE): 2 the queue thread (vulkan/exec.c qt_wanted; the default since Amaral.10, "queue"),
 // 3 the texture checks' helper thread (textures.c, "texhelper"), 0 the early depth tests (exec.c early_z_on, "early_z"),
 // 1 the game's busiest threads in the ADPF session (platform/android.c, "adpf" - also LARECOMP_AB=adpf; no gain, 30/10)
@@ -317,7 +321,7 @@ void diag_request_ab(int seconds) {
 void diag_request(int seconds) {
     if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
     memset(ab_cl_sum, 0, sizeof ab_cl_sum), memset(ab_cl_samples, 0, sizeof ab_cl_samples);
-    memset(ab_real, 0, sizeof ab_real), memset(ab_ns, 0, sizeof ab_ns), ab_t = 0, rf_n = rf_ns = 0;
+    ab_on_frames = ab_on_active = 0, memset(ab_real, 0, sizeof ab_real), memset(ab_ns, 0, sizeof ab_ns), ab_t = 0, rf_n = rf_ns = 0;
     gpu_mhz_min = gpu_mhz_max = 0, gpu_mhz_sum = 0, gpu_mhz_n = 0;
     tl_n = tl_f = tl_shown = 0, tl_rf = tl_rf_ns = tl_t0 = tl_last = 0;
     g_seconds = seconds > 0 ? seconds : 60;
@@ -359,7 +363,7 @@ void diag_displayed(uint32_t id, uint64_t t) {
     static uint32_t last_id;
     if (atomic_load(&g_state) != 2 || t <= f_last_shown) return;
     if (f_last_shown && id == last_id + 1 && t - f_last_shown < 200000000ull && f_nshown < FMAX)
-        f_shown_flags[f_nshown] = (uint8_t)(1 | (g_diag_ab == 1 ? 4 : 0)), f_shown[f_nshown++] = t - f_last_shown;
+        f_shown_flags[f_nshown] = (uint8_t)(1 | (g_diag_ab == 1 ? 4 : 0) | (ab_warm ? 8 : 0)), f_shown[f_nshown++] = t - f_last_shown;
     f_last_shown = t, last_id = id;
 }
 // (vulkan/device.c) a real frame presented - with the frame generation, the generated ones aside
@@ -368,7 +372,13 @@ void diag_real_frame(void) {
     uint64_t now = now_fn();
     if (ab_t && now - ab_t < 250000000ull && diag_in_gameplay()) {
         rf_n++, rf_ns += now - ab_t;
-        if (g_diag_ab >= 0) ab_real[g_diag_ab]++, ab_ns[g_diag_ab] += now - ab_t;
+        if (g_diag_ab >= 0 && !ab_warm) ab_real[g_diag_ab]++, ab_ns[g_diag_ab] += now - ab_t;
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+        if (g_diag_ab == 1 && !ab_warm && g_diag_ab_what == 2) {
+            extern bool vk_qt_active(void);
+            ab_on_frames++, ab_on_active += vk_qt_active();
+        }
+#endif
     }
     ab_t = now;
 }
@@ -406,7 +416,7 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         { extern void diag_gpu_ts_health(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *);
           diag_gpu_ts_health(&g_ts0[0], &g_ts0[1], &g_ts0[2], &g_ts0[3], &g_ts0[4], &g_ts0[5]); }
 #endif
-        if (g_ab_want) g_diag_ab = 1, f_next_ab = now + 10000000000ull;
+        if (g_ab_want) g_diag_ab = 1, f_next_ab = now + 10000000000ull, ab_warm = true;
         f_last_rcpu = thread_cpu(), f_last_mcpu = tid_cpu(atomic_load(&g_main_tid));
         atomic_store(&g_state, 2);
         LOG("[diag] recording %d s from here%s\n", g_seconds, g_ab_want ? " (the compared feature alternating every 10 s)" : "");
@@ -423,7 +433,7 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         f_acquire[f_n] = acquire_ns;
         f_present[f_n] = present_ns;
         f_gpu[f_n] = gpu - f_last_gpu;
-        f_flags[f_n] = (uint8_t)((game ? 1 : 0) | (atomic_load(&g_sampler_on) ? 2 : 0) | (g_diag_ab == 1 ? 4 : 0));
+        f_flags[f_n] = (uint8_t)((game ? 1 : 0) | (atomic_load(&g_sampler_on) ? 2 : 0) | (g_diag_ab == 1 ? 4 : 0) | (ab_warm ? 8 : 0));
         f_nmenu += !game;
         f_n++;
     }
@@ -431,6 +441,7 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
     if (g_diag_ab >= 0 && now >= f_next_ab) {
         f_next_ab = now + 10000000000ull;
         g_diag_ab = !g_diag_ab;
+        ab_warm = false;
     }
 #ifdef __ANDROID__
     if (now >= f_next_stats) {  // the clocks and the heat, every 2 s
@@ -444,9 +455,9 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
             if (!cl_samples || m < cl_min[i]) cl_min[i] = m;
             if (m > cl_max[i]) cl_max[i] = m;
             cl_sum[i] += m;
-            if (g_diag_ab >= 0) ab_cl_sum[g_diag_ab][i] += m;
+            if (g_diag_ab >= 0 && !ab_warm) ab_cl_sum[g_diag_ab][i] += m;
         }
-        if (g_diag_ab >= 0) ab_cl_samples[g_diag_ab]++;
+        if (g_diag_ab >= 0 && !ab_warm) ab_cl_samples[g_diag_ab]++;
         cl_samples++;
         if (ds.gpu_mhz) {
             if (!gpu_mhz_n || ds.gpu_mhz < gpu_mhz_min) gpu_mhz_min = ds.gpu_mhz;
@@ -807,21 +818,26 @@ static void *report_main(void *arg) {
                                         "the queue thread, Video > Queue thread", "the texture checks' helper thread"};
         out("-- A/B: %s (on / off, alternating every 10 s; gameplay frames)",
             g_diag_ab_what >= 0 && g_diag_ab_what <= 3 ? ab_name[g_diag_ab_what] : "?");
+        out("(the first 10 s left out of both sides)");
+        if (g_diag_ab_what == 2)
+            out("the queue thread ran in %llu of the ON side's %llu real frames%s", (unsigned long long)ab_on_active,
+                (unsigned long long)ab_on_frames, ab_on_frames && ab_on_active * 2 < ab_on_frames
+                ? " - frame generation on? it keeps the queue thread off in play: this comparison doesn't test it" : "");
         for (int a = 1; a >= 0; a--)
             if (ab_ns[a]) out("real frames a second with it %s: %.2f (%llu in %.1f s)", a ? "ON " : "OFF", ab_real[a] * 1e9 / ab_ns[a],
                               (unsigned long long)ab_real[a], ab_ns[a] / 1e9);
         if (f_nshown) {
-            stat_line("interval as the screen showed it, ON ", f_shown, f_nshown, f_shown_flags, 5, 5);
-            stat_line("interval as the screen showed it, OFF", f_shown, f_nshown, f_shown_flags, 5, 1);
+            stat_line("interval as the screen showed it, ON ", f_shown, f_nshown, f_shown_flags, 13, 5);
+            stat_line("interval as the screen showed it, OFF", f_shown, f_nshown, f_shown_flags, 13, 1);
         }
-        stat_line("present interval, ON ", f_interval, f_n, f_flags, 5, 5);
-        stat_line("present interval, OFF", f_interval, f_n, f_flags, 5, 1);
-        stat_line("render thread CPU per interval, ON ", f_rcpu, f_n, f_flags, 5, 5);
-        stat_line("render thread CPU per interval, OFF", f_rcpu, f_n, f_flags, 5, 1);
-        stat_line("main thread CPU per interval, ON ", f_mcpu, f_n, f_flags, 5, 5);
-        stat_line("main thread CPU per interval, OFF", f_mcpu, f_n, f_flags, 5, 1);
-        stat_line("GPU busy per interval (use the mean), ON ", f_gpu, f_n, f_flags, 5, 5);
-        stat_line("GPU busy per interval (use the mean), OFF", f_gpu, f_n, f_flags, 5, 1);
+        stat_line("present interval, ON ", f_interval, f_n, f_flags, 13, 5);
+        stat_line("present interval, OFF", f_interval, f_n, f_flags, 13, 1);
+        stat_line("render thread CPU per interval, ON ", f_rcpu, f_n, f_flags, 13, 5);
+        stat_line("render thread CPU per interval, OFF", f_rcpu, f_n, f_flags, 13, 1);
+        stat_line("main thread CPU per interval, ON ", f_mcpu, f_n, f_flags, 13, 5);
+        stat_line("main thread CPU per interval, OFF", f_mcpu, f_n, f_flags, 13, 1);
+        stat_line("GPU busy per interval (use the mean), ON ", f_gpu, f_n, f_flags, 13, 5);
+        stat_line("GPU busy per interval (use the mean), OFF", f_gpu, f_n, f_flags, 13, 1);
         for (int s = 1; s >= 0; s--) {
             if (!ab_cl_samples[s] || !cl_n) continue;
             char line[256];
