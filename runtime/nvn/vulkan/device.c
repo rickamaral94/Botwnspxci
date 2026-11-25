@@ -1584,8 +1584,12 @@ static void vsync_update(uint64_t queued) {
     {   // (Amaral.19) the screen's period as it really shows images: consecutive presents' actual times, each over the
         // refreshes between them (refreshDuration said 16.667 ms on the Odin, the images came 16.75 apart: a 60 Hz grid of
         // its own drifted 0.08 ms a frame against the screen, two images into one refresh every few seconds - a 33 ms hole)
-        static uint32_t last_id;
-        static uint64_t last_t;
+        static uint32_t last_id, rejected;
+        static uint64_t last_t, meas_p;
+        // (a new screen mode - the reported period moved by over 1% - or 32 samples in a row away from the mean: measured
+        // again from scratch, as the Turnip agent advised; a frame without its time or dropped breaks the consecutive pair)
+        if (p && meas_p && (p > meas_p ? p - meas_p : meas_p - p) > meas_p / 100) vs_meas = 0, vs_meas_n = 0, rejected = 0;
+        meas_p = p;
         for (uint32_t pass = 0; pass < n; pass++) {  // (in presentID order: 8 at most)
             int best = -1;
             for (uint32_t i = 0; i < n; i++)
@@ -1593,12 +1597,16 @@ static void vsync_update(uint64_t queued) {
             if (best < 0) break;
             uint32_t id = past[best].presentID;
             uint64_t t = past[best].actualPresentTime;
-            if (last_id && id == last_id + 1 && t > last_t && p) {
+            if (last_id && id == last_id + 1 && t && last_t && t > last_t && p) {
                 uint64_t d = t - last_t, k = (d + p / 2) / p;
                 if (k >= 1 && k <= 4 && (d > k * p ? d - k * p : k * p - d) < p / 4) {
                     double s = (double)d / (double)k, m = vs_meas;
-                    vs_meas = m > 0 && fabs(s - m) < m / 50 ? m + (s - m) / 32 : m > 0 ? m : s;
-                    if (vs_meas_n < 1000000) vs_meas_n++;
+                    if (m > 0 && fabs(s - m) >= m / 50) {
+                        if (++rejected >= 32) vs_meas = 0, vs_meas_n = 0, rejected = 0;
+                    } else {
+                        vs_meas = m > 0 ? m + (s - m) / 32 : s, rejected = 0;
+                        if (vs_meas_n < 1000000) vs_meas_n++;
+                    }
                 }
             }
             last_id = id, last_t = t;
