@@ -2445,7 +2445,6 @@ void vk_diag_context(char *buf, size_t n) {
     int m = g_settings.res_mode;
     if (m >= 0 && m <= 8) snprintf(rs, sizeof rs, "%s", res[m]);
     else if (m == RES_DYNAMIC) snprintf(rs, sizeof rs, "Dynamic (now %.2f)", output_scale_dynamic_factor());
-    else if (m == RES_DYN1X) snprintf(rs, sizeof rs, "1x dynamic (now %.0f lines)", output_scale_dynamic_factor() * 900);
     else snprintf(rs, sizeof rs, "%s", m == RES_Q75 ? ".75x" : m == RES_Q50 ? ".50x" : m == RES_Q25 ? ".25x" : "?");
     snprintf(buf, n, "driver %s | LRZ %s | internal resolution %s | frame generation %s | frame rate %s | sync lag %s",
              g_vk_driver_desc, g_lrz_at_start ? "on" : "off", rs, fg ? (mult == 4 ? "4x" : mult == 3 ? "3x" : "2x") : "off",
