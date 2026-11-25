@@ -2901,6 +2901,46 @@ static uint32_t lz_ndraw, lz_pw, lz_ph, lz_iw, lz_ih, lz_verts;
 static uint64_t lz_passes, lz_passes_valid, lz_inv[LZ_NR], lz_fs_nowrite;  // (fs depth / store ones without a depth write: the Turnip agent's lab question)
 static struct { uint64_t fs, vs; uint32_t reason, w, h, at, n, verts; } lz_top[24];  // (verts: the draw's count - 3 or 4: a full-screen one, a clear by a draw?)
 static int lz_ntop;
+// (Amaral.20 lab A/B) whether Turnip writes LRZ in a depth-writing draw (tu6_calc_blend_lrz, tu_lrz.cc): blend on a slot,
+// a write mask short of the format's channels or a slot not written turn the writes off for the rest of the pass
+// ("Depth write + blending"); a discard / demote in the FS (has_kill) or alpha-to-coverage, for that draw alone - with no
+// reason in the trace. The standard driver also counts a slot without a format (our duplicate-slot nulling, begin_pass)
+// as not written; the lrzslots lab doesn't. [g]: passes with 5+ colours, the G-buffer.
+enum { LZW_DRAWS, LZW_VALID, LZW_DISCARD, LZW_A2C, LZW_BLEND, LZW_MASK, LZW_UNDEF, LZW_WRITES_STD, LZW_WRITES_LAB, LZW_N };
+static uint64_t lzw[2][LZW_N];
+static bool lzw_off_std, lzw_off_lab;  // (this pass's LRZ writes turned off for the rest of it, by each driver's rule)
+// (a colour format's channels as a write mask: 1 R, 3 RG, 7 RGB / B10G11R11, else RGBA - the VkFormat numbers)
+static uint32_t lz_fmt_mask(int f) {
+    if ((f >= 9 && f <= 15) || (f >= 70 && f <= 76) || (f >= 98 && f <= 100) || f == 110 || f == 111 || f == 112) return 1;
+    if ((f >= 16 && f <= 22) || (f >= 77 && f <= 83) || (f >= 101 && f <= 103) || f == 113 || f == 114 || f == 115) return 3;
+    if (f == 4 || f == 5 || f == 122 || f == 123 || (f >= 23 && f <= 36) || (f >= 84 && f <= 90) || (f >= 104 && f <= 106)) return 7;
+    return 15;
+}
+// (draw, after lz_draw) a depth-tested draw writing depth: its FS discard, alpha-to-coverage, blend bits and per slot
+// (ncolor of them) the format (0: none) and write mask
+static void lz_write(bool discard, bool a2c, uint32_t blend_on, uint32_t ncolor, const int *fmt, const uint32_t *wmask) {
+    if (!lz_tex) return;
+    bool blend = false, mask = false, undef = false;
+    for (uint32_t i = 0; i < ncolor && i < 8; i++) {
+        if (!fmt[i]) { undef = true; continue; }
+        uint32_t need = lz_fmt_mask(fmt[i]);
+        if ((blend_on >> i) & 1) blend = true;
+        if ((wmask[i] & need) != need) mask = true;
+    }
+    for (int g = 0; g < 2; g++) {
+        if (g && ncolor < 5) break;
+        uint64_t *c = lzw[g];
+        c[LZW_DRAWS]++, c[LZW_VALID] += lz_valid, c[LZW_DISCARD] += discard, c[LZW_A2C] += a2c;
+        c[LZW_BLEND] += blend, c[LZW_MASK] += mask && !blend, c[LZW_UNDEF] += undef && !blend && !mask;
+    }
+    if (blend || mask) lzw_off_std = lzw_off_lab = true;
+    if (undef) lzw_off_std = true;
+    bool draw_ok = lz_valid && !discard && !a2c;
+    for (int g = 0; g < 2; g++) {
+        if (g && ncolor < 5) break;
+        lzw[g][LZW_WRITES_STD] += draw_ok && !lzw_off_std, lzw[g][LZW_WRITES_LAB] += draw_ok && !lzw_off_lab;
+    }
+}
 static int lz_find(const void *t) {
     for (int i = 0; i < lz_nimg; i++) if (lz_img[i].tex == t) return i;
     if (lz_nimg < 16) { lz_img[lz_nimg].tex = t, lz_img[lz_nimg].valid = 0; return lz_nimg++; }
@@ -2921,6 +2961,7 @@ static void lz_begin(const void *tex, bool clear, uint32_t w, uint32_t h, uint32
     lz_kill_after = clear && !whole;
     if (lz_kill_after) lz_inv[LZ_CLEAR_AREA]++;  // (valid in this pass, not after it)
     lz_passes++, lz_passes_valid += lz_valid;
+    lzw_off_std = lzw_off_lab = false;
 }
 static uint64_t hmix(uint64_t h, const void *p, size_t n);
 static void lz_invalidate(int reason, uint64_t fs, uint64_t vs_code) {
@@ -2982,6 +3023,17 @@ static void lz_stats(void) {
         LOG("[lrz]   %u x: %s - fs %016llx vs %016llx, pass %ux%u, at draw %u, %u vertices\n", lz_top[i].n,
             lz_rname[lz_top[i].reason], (unsigned long long)lz_top[i].fs, (unsigned long long)lz_top[i].vs, lz_top[i].w, lz_top[i].h,
             lz_top[i].at, lz_top[i].verts);
+    for (int g = 0; g < 2; g++) {
+        const uint64_t *c = lzw[g];
+        if (!c[LZW_DRAWS]) continue;
+        LOG("[lrz] %s draws writing depth %llu (LRZ valid %llu): with a discard %llu, alpha-to-coverage %llu; turning the pass's "
+            "LRZ writes off: blend %llu, a partial mask %llu, a slot without a format %llu (the standard driver only); writing LRZ: "
+            "standard driver %llu, lrzslots lab %llu\n", g ? "G-buffer (5+ colours):" : "all passes:",
+            (unsigned long long)c[LZW_DRAWS], (unsigned long long)c[LZW_VALID], (unsigned long long)c[LZW_DISCARD],
+            (unsigned long long)c[LZW_A2C], (unsigned long long)c[LZW_BLEND], (unsigned long long)c[LZW_MASK],
+            (unsigned long long)c[LZW_UNDEF], (unsigned long long)c[LZW_WRITES_STD], (unsigned long long)c[LZW_WRITES_LAB]);
+    }
+    memset(lzw, 0, sizeof lzw);
     lz_passes = lz_passes_valid = lz_fs_nowrite = 0, memset(lz_inv, 0, sizeof lz_inv), lz_ntop = 0;
 }
 static void vk_end_pass_at(int line);
@@ -9627,6 +9679,11 @@ static void draw_(CmdRec *r, bool indexed) {
     // the pipeline has them, PipeKey.fx)
     lz_verts = (uint32_t)r->x[2];
     lz_draw(dt, dw, dop, pr->fi->writes_depth, pr->fi->uses_gmem_store, g_cur_fs_hash, st.program ? st.program->stages[0].code_addr : 0, false);
+    if (lz_tex && dt && dw) {
+        int fmt[8] = {0};
+        for (uint32_t i = 0; i < pp->k.ncolor && i < 8; i++) fmt[i] = (int)pp->k.color[i];
+        lz_write(pr->fi->uses_discard, pp->k.a2c, pp->k.blend_on, pp->k.ncolor, fmt, pp->k.write_mask);
+    }
     if (ss_need(SS_DT, ss.dt == (VkBool32)dt)) { ss.dt = dt; vkCmdSetDepthTestEnable(cb, dt); }
     if (ss_need(SS_DW, ss.dw == dw)) { ss.dw = dw; vkCmdSetDepthWriteEnable(cb, dw); }
     if (ss_need(SS_DOP, ss.dop == dop)) { ss.dop = dop; vkCmdSetDepthCompareOp(cb, dop); }  // (EQUAL's tolerance: above)

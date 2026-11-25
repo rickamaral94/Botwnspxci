@@ -65,8 +65,34 @@ int main(void) {
     CHECK(strstr(logbuf, "[lrz] 10 s: 10 passes with depth") != NULL);
     CHECK(strstr(logbuf, "fs 0000000000000005") != NULL);
     CHECK(strstr(logbuf, "(of those without a depth write 1)") != NULL);  // (draw 5: the FS writes depth, no depth write)
+    // (lab A/B) LRZ writes in a G-buffer like BOTW's: RGBA8 slots 0, 1, 3, 5 and the duplicates 2, 4 without a format
+    logn = 0, logbuf[0] = 0;
+    const int gb[6] = {37, 37, 0, 37, 0, 37}; const uint32_t full[6] = {15, 15, 0, 15, 0, 15};
+    lz_begin(A, true, 1600, 900, 1600, 900);
+    lz_draw(true, true, VK_COMPARE_OP_LESS, false, false, 9, 0, false);
+    lz_write(false, false, 0, 6, gb, full);   // opaque: the lab writes LRZ, the standard driver doesn't (UNDEFINED slots)
+    lz_write(true, false, 0, 6, gb, full);    // alpha-tested: neither (this draw only)
+    lz_write(false, true, 0, 6, gb, full);    // alpha-to-coverage: neither (this draw only)
+    lz_write(false, false, 0, 6, gb, full);   // opaque again: the lab still writes
+    CHECK(lzw[1][LZW_DRAWS] == 4 && lzw[1][LZW_WRITES_LAB] == 2 && lzw[1][LZW_WRITES_STD] == 0 && lzw[1][LZW_DISCARD] == 1 &&
+          lzw[1][LZW_A2C] == 1 && lzw[1][LZW_UNDEF] == 4);
+    const uint32_t part[6] = {15, 7, 0, 15, 0, 15};
+    lz_write(false, false, 0, 6, gb, part);   // a partial mask: off for the rest of the pass in both
+    lz_write(false, false, 0, 6, gb, full);
+    CHECK(lzw[1][LZW_WRITES_LAB] == 2 && lzw[1][LZW_MASK] == 1);
+    lz_end();
+    lz_begin(A, false, 1600, 900, 1600, 900);  // (a new pass: writes back on)
+    const int rg[2] = {77, 37}; const uint32_t rgm[2] = {3, 15};
+    lz_write(false, false, 0, 2, rg, rgm);    // RG16 with mask RG: full; not a G-buffer pass
+    lz_write(false, false, 2, 2, rg, rgm);    // blend on slot 1: off in both
+    lz_write(false, false, 0, 2, rg, rgm);
+    CHECK(lzw[0][LZW_WRITES_LAB] == 3 && lzw[0][LZW_WRITES_STD] == 1 && lzw[0][LZW_BLEND] == 1 && lzw[1][LZW_DRAWS] == 6);
+    lz_end();
+    lz_stats();
+    CHECK(strstr(logbuf, "G-buffer (5+ colours): draws writing depth 6") != NULL);
+    CHECK(strstr(logbuf, "standard driver 0, lrzslots lab 2") != NULL);
     if (fails) { fputs(logbuf, stderr); return 1; }
-    printf("lrz prediction: 9 cases, the 10 s line and its draws\n");
+    printf("lrz prediction: 9 cases, the 10 s line and its draws; LRZ writes by each driver's rule: 4 cases\n");
     return 0;
 }
 '''
