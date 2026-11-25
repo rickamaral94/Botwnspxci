@@ -390,7 +390,8 @@ void settings_load(void) {
 #endif
         else if (!strcmp(key, "resolution")) {
             int n = atoi(val);
-            g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : (!strcmp(val, "75%") || !strcmp(val, "67%")) ? RES_Q75 :
+            g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : !strcmp(val, "1x dynamic") ? RES_DYN1X :
+                                  (!strcmp(val, "75%") || !strcmp(val, "67%")) ? RES_Q75 :
                                   !strcmp(val, "50%") ? RES_Q50 : !strcmp(val, "25%") ? RES_Q25 :
                                   (n >= 1 && n <= 4) ? n : n > 4 ? 4 : RES_MATCH;  // (5x-8x were removed)
         }
@@ -504,6 +505,7 @@ void settings_save(void) {
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : g_settings.antialias == AA_FXAA ? "fxaa" : "off");
     fprintf(f, "shadows = %d\n", g_settings.shadows ? 1 : 0);
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
+    else if (g_settings.res_mode == RES_DYN1X) fprintf(f, "resolution = 1x dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
     else if (g_settings.res_mode == RES_Q25) fprintf(f, "resolution = 25%%\n");
     else if (g_settings.res_mode == RES_Q50) fprintf(f, "resolution = 50%%\n");

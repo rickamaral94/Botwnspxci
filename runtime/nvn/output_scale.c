@@ -110,7 +110,58 @@ static void dyn_update(double now, double gpu_ms) {
     }
 }
 
-double output_scale_dynamic_factor(void) { return g_dyn; }
+// 1x dynamic (RES_DYN1X): what the game does on the Switch docked - its 3D scene at 900 lines, down to 720 (0.80) in
+// 5% steps where the GPU can't hold the frame rate, back up when it can. It keeps 1x's sharpness wherever 1x keeps up:
+// the Odin 2 (Adreno 740, frame generation 2x) held 30 real frames a second at 1x with 24-26 ms of GPU each, and fell
+// to 28.6-29.6 in dense places at 27.9-28.8 ms plus ~3-4 ms of frame generation, over the real frame's 33.3 (logs
+// 8ce39b7d, ab6c5f7d). Down when the GPU's time per real frame, frame generation's added, is over 94% of the frame;
+// up when the next step's estimate (the time x the pixels' ratio, all of it as if it scaled - an overestimate) is under
+// 90%. A change reallocates the scene's targets (a short hitch): at least 3 s apart, and up only after 2 s of room.
+static double g_d1 = 1.0, g_d1_gpu_t0, g_d1_dt_sum, g_d1_last_t, g_d1_next_change;
+static int g_d1_n, g_d1_good;
+// (now: s; gpu_ms: the backend's last frame - used where there is no busy total; fg_ms: frame generation's GPU time per
+// real frame, 0 without it) returns the scale on 1x, 0.80 .. 1
+double output_scale_dyn1_step(double now, double gpu_ms, double busy_total_ns, double fg_ms, double want) {
+    if (g_d1_last_t <= 0) { g_d1_last_t = now; g_d1_gpu_t0 = busy_total_ns; g_d1_dt_sum = 0, g_d1_n = 0; return g_d1; }
+    double dt = (now - g_d1_last_t) * 1000.0;
+    g_d1_last_t = now;
+    if (dt > 250) { g_d1_gpu_t0 = busy_total_ns; g_d1_dt_sum = 0, g_d1_n = 0; g_d1_good = 0; return g_d1; }  // (loading, menus)
+    g_d1_dt_sum += dt, g_d1_n++;
+    if (g_d1_n < 15) return g_d1;  // (decide every ~half second at 30)
+    double avg_dt = g_d1_dt_sum / g_d1_n;
+    double avg_gpu = busy_total_ns > 0 ? (busy_total_ns - g_d1_gpu_t0) / 1e6 / g_d1_n : gpu_ms;
+    g_d1_gpu_t0 = busy_total_ns, g_d1_dt_sum = 0, g_d1_n = 0;
+    if (!(avg_gpu > 0)) return g_d1;  // (no GPU time read back yet)
+    double load = avg_gpu + (fg_ms > 0 ? fg_ms : 0), prev = g_d1;
+    bool slow = load > want * 0.94 && avg_dt > want * 0.98;  // (the GPU's share of a frame that is late or about to be)
+    if (slow) {
+        g_d1_good = 0;
+        if (now >= g_d1_next_change && g_d1 > 0.80) g_d1 = fmax(0.80, g_d1 - (load > want * 1.10 ? 0.10 : 0.05));
+    } else if (g_d1 < 1.0) {
+        double up = fmin(1.0, g_d1 + 0.05), est = avg_gpu * (up * up) / (g_d1 * g_d1) + (fg_ms > 0 ? fg_ms : 0);
+        g_d1_good = est < want * 0.90 ? g_d1_good + 1 : 0;
+        if (g_d1_good >= 4 && now >= g_d1_next_change) g_d1 = up, g_d1_good = 0;
+    }
+    g_d1 = round(g_d1 * 20) / 20;
+    if (g_d1 != prev) {
+        g_d1_next_change = now + 3.0;
+        LOG("[dynres] 1x dynamic %.2f -> %.2f (%.0f lines; frame %.1f ms, GPU %.1f + frame generation %.1f ms of %.1f)\n", prev,
+            g_d1, g_d1 * SCENE_LINES, avg_dt, avg_gpu, fg_ms > 0 ? fg_ms : 0, want);
+    }
+    return g_d1;
+}
+static double dyn1_update(double now, double gpu_ms) {
+    double want = framepace_on() && framepace_target() > 0 ? 1000.0 / framepace_target() : 1000.0 / 30, fg = 0, busy = 0;
+#ifdef __ANDROID__
+    want = fps_mode_now() == 2 || fps_mode_now() == 4 ? want : fps_mode_now() == 3 ? 1000.0 / 20 : 1000.0 / 30;
+    extern double fg_gpu_ms_per_real(void);
+    fg = fg_gpu_ms_per_real();
+    busy = (double)diag_gpu_busy_total_ns();
+#endif
+    return output_scale_dyn1_step(now, gpu_ms, busy, fg, want);
+}
+
+double output_scale_dynamic_factor(void) { return g_settings.res_mode == RES_DYN1X ? g_d1 : g_dyn; }
 
 void output_scale(double dw, double dh, bool reshape_allowed, double now, double gpu_ms, OutScale *o) {
     if (!(dw > 0 && dh > 0 && isfinite(dw) && isfinite(dh))) {
@@ -167,6 +218,7 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     int mode = g_settings.res_mode;
     if (forced > 0) hs = forced;
     else if (mode >= 1 && mode <= 8) hs = mode;
+    else if (mode == RES_DYN1X) hs = dyn1_update(now, gpu_ms);
     else {
         hs = h * 1080.0 / SCENE_LINES;  // Match display
         // (Auto output: the shares below are of the screen's lines, as they were before it - only the final image is

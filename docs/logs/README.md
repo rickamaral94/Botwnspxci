@@ -29,6 +29,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [Release Amaral.17, 24/11](2026-11-24-release-amaral17.md) | release (não pre-release), APK 55 | A versão para jogar: as melhorias medidas ligadas, os experimentos sem ganho desligados, as medições só durante "Medir desempenho", e a configuração recomendada no Odin. |
 | [Amaral.18, 24/11](2026-11-24-amaral18.md) | Odin (release .17) + host, APK 56 | A .17 no Odin: 29,76 quadros reais/s, GPU 24,1 ms (antes 27,9 e 27,5). As pequenas quedas são buracos de 33 ms na grade da geração de quadros e pipelines novos em área nova. Nova opção "Suavidade da geração de quadros" (folga de um período, ligada). |
 | [Amaral.19, 25/11](2026-11-25-amaral19.md) | Odin (.18) + host, APK 57 | A tela estava a 59,7 Hz (16,75 ms) e a grade da geração de quadros a 60 Hz exatos: deriva e buracos de 33 ms (p95 33,5). A grade agora usa o período medido pelos tempos reais de apresentação e se alinha à atualização. |
+| [Amaral.21, 25/11](2026-11-25-amaral21.md) | logs do Odin já coletados + host, APK 59 | O lab do LRZ deu 0% (encerrado). Nova "1x dinâmica": 900 linhas, baixando até 720 só onde a GPU não segura 30 (como no Switch), para as quedas da área densa. Não testada no Odin. |
 
 ## Revisões externas e Turnip
 

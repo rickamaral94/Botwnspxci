@@ -704,11 +704,11 @@ static void tab_display(void) {
     // (up to 4x: 7680 x 4320, 8K - more only ran out of GPU memory, and sat next to 75% in the list)
     // (Match display in the middle: left from it 75% / 50% / 25%, right Dynamic then 1x-4x; user 2026-10-11)
 #ifdef __ANDROID__  // (3x / 4x: 4K / 8K, beyond a phone)
-    static const char *res[] = {"25%", "50%", "75%", "Match display", "Dynamic", "1x", "2x"};
-    static const int res_mode[] = {RES_Q25, RES_Q50, RES_Q75, RES_MATCH, RES_DYNAMIC, 1, 2};
+    static const char *res[] = {"25%", "50%", "75%", "Match display", "Dynamic", "1x dynamic", "1x", "2x"};
+    static const int res_mode[] = {RES_Q25, RES_Q50, RES_Q75, RES_MATCH, RES_DYNAMIC, RES_DYN1X, 1, 2};
 #else
-    static const char *res[] = {"25%", "50%", "75%", "Match display", "Dynamic", "1x", "2x", "3x", "4x"};
-    static const int res_mode[] = {RES_Q25, RES_Q50, RES_Q75, RES_MATCH, RES_DYNAMIC, 1, 2, 3, 4};
+    static const char *res[] = {"25%", "50%", "75%", "Match display", "Dynamic", "1x dynamic", "1x", "2x", "3x", "4x"};
+    static const int res_mode[] = {RES_Q25, RES_Q50, RES_Q75, RES_MATCH, RES_DYNAMIC, RES_DYN1X, 1, 2, 3, 4};
 #endif
     enum { RES_MATCH_AT = 3 };
     enum { NRES = sizeof res_mode / sizeof res_mode[0] };
@@ -726,6 +726,10 @@ static void tab_display(void) {
                          1600.0 * sx, 900.0 * sy);
         if (g_settings.res_mode == RES_DYNAMIC && n > 0 && n < (int)sizeof d)
             snprintf(d + n, sizeof d - n, tr(" Dynamic: %.0f%% of the display right now."), output_scale_dynamic_factor() * 100);
+        if (g_settings.res_mode == RES_DYN1X && n > 0 && n < (int)sizeof d)
+            snprintf(d + n, sizeof d - n, tr(" 1x dynamic: the Switch's 900p, lowered to 720p at most while the GPU can't hold the "
+                                             "frame rate, as the game does on the Switch. %.0f lines right now."),
+                     output_scale_dynamic_factor() * 900);
         if (opt_choice("Internal resolution", &ri, res, NRES, RES_MATCH_AT, d, false)) g_settings.res_mode = res_mode[ri];
     }
     {   // bilinear next to each OS's own upscaler (MetalFX on macOS) or AMD FSR 1 and Snapdragon GSR 1 (Vulkan)

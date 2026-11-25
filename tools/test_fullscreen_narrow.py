@@ -30,7 +30,7 @@ PRELUDE = r'''
 #define RT_ON_RESET(name) static void name(void)
 
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
-enum { RES_MATCH = 0, RES_1X = 1, RES_Q75 = 9, RES_Q50 = 10, RES_Q25 = 11, RES_DYNAMIC = 12 };
+enum { RES_MATCH = 0, RES_1X = 1, RES_Q75 = 9, RES_Q50 = 10, RES_Q25 = 11, RES_DYNAMIC = 12, RES_DYN1X = 13 };
 enum { OUT_AUTO = 0 };
 
 static struct { int aspect, res_mode, out_lines; } g_settings = {ASPECT_UNLOCKED, RES_MATCH, OUT_AUTO};
