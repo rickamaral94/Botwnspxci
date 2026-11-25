@@ -1545,6 +1545,8 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
 // and an average of it kept moving for seconds after), ns. vs_fit: the latest frame reached the screen on the grid.
 static uint64_t vs_anchor, vs_period, vs_delay;
 static bool vs_fit;
+static double vs_meas;      // (render thread) the period measured from the actual present times, ns (0: none yet)
+static uint32_t vs_meas_n;  // (its samples)
 static uint32_t present_id;
 static uint64_t present_asked;  // when the game's thread handed over the frame being presented (vk_present_now)
 
@@ -1579,6 +1581,29 @@ static void vsync_update(uint64_t queued) {
     if (g_benchmark) for (uint32_t i = 0; i < n; i++) bench_present_actual(past[i].presentID, past[i].actualPresentTime);
     uint64_t a = 0;
     for (uint32_t i = 0; i < n; i++) if (past[i].actualPresentTime > a) a = past[i].actualPresentTime;
+    {   // (Amaral.19) the screen's period as it really shows images: consecutive presents' actual times, each over the
+        // refreshes between them (refreshDuration said 16.667 ms on the Odin, the images came 16.75 apart: a 60 Hz grid of
+        // its own drifted 0.08 ms a frame against the screen, two images into one refresh every few seconds - a 33 ms hole)
+        static uint32_t last_id;
+        static uint64_t last_t;
+        for (uint32_t pass = 0; pass < n; pass++) {  // (in presentID order: 8 at most)
+            int best = -1;
+            for (uint32_t i = 0; i < n; i++)
+                if (past[i].presentID > last_id && (best < 0 || past[i].presentID < past[best].presentID)) best = (int)i;
+            if (best < 0) break;
+            uint32_t id = past[best].presentID;
+            uint64_t t = past[best].actualPresentTime;
+            if (last_id && id == last_id + 1 && t > last_t && p) {
+                uint64_t d = t - last_t, k = (d + p / 2) / p;
+                if (k >= 1 && k <= 4 && (d > k * p ? d - k * p : k * p - d) < p / 4) {
+                    double s = (double)d / (double)k, m = vs_meas;
+                    vs_meas = m > 0 && fabs(s - m) < m / 50 ? m + (s - m) / 32 : m > 0 ? m : s;
+                    if (vs_meas_n < 1000000) vs_meas_n++;
+                }
+            }
+            last_id = id, last_t = t;
+        }
+    }
     if (a <= vs_anchor) return;
     if (vs_anchor && p) {
         uint64_t r = (a - vs_anchor) % p;
@@ -1587,6 +1612,16 @@ static void vsync_update(uint64_t queued) {
     __atomic_store_n(&vs_anchor, a, __ATOMIC_RELAXED);
 }
 
+// (vulkan/framegen.c, the render thread) the screen's grid for the frame generation's pacing: a refresh's time (when the
+// latest timed image reached the screen, CLOCK_MONOTONIC ns) and the period measured from the actual present times (the
+// reported one until 16 samples); false: none, or none for 2 s
+bool vk_vsync_grid(uint64_t now, uint64_t *anchor, double *period) {
+    uint64_t a = __atomic_load_n(&vs_anchor, __ATOMIC_RELAXED), p = __atomic_load_n(&vs_period, __ATOMIC_RELAXED);
+    if (!a || !p || now < a || now - a > 2000000000ull) return false;
+    *anchor = a;
+    *period = vs_meas_n >= 16 ? vs_meas : (double)p;
+    return true;
+}
 bool backend_vsync_offset(uint64_t t, uint64_t grid, int64_t *off, uint64_t *period) {
     uint64_t a = __atomic_load_n(&vs_anchor, __ATOMIC_RELAXED), p = __atomic_load_n(&vs_period, __ATOMIC_RELAXED);
     uint64_t d = __atomic_load_n(&vs_delay, __ATOMIC_RELAXED);

@@ -20,6 +20,7 @@
 // Turning it on takes the app's restart (the device's features: device.c); off takes effect at once.
 // LARECOMP_FG_LOG=1: a [fg] line every 2 s (always while measuring).
 #ifdef __ANDROID__
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -380,7 +381,23 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
         // game's 30 fps frames came 2-10 ms late in ~5% (real frame p95 35.8, p99 43.9 ms), each a 33 ms hole on the
         // screen (shown intervals p95 33.4 ms): a late frame found its slot past and the grid started again. With a
         // period of headroom it still meets it; the input is ~17 ms later.)
-        const uint64_t OUT_NS = 1000000000ull / (uint64_t)modes[mode_now()].out;
+        // (Amaral.19) The grid on the screen's own refreshes: its period a whole number of the period measured from
+        // the actual present times (device.c vk_vsync_grid), and each slot half a refresh before one - SurfaceFlinger
+        // shows a frame at the first refresh at or after its time, so a slot there lands on that refresh with half a
+        // refresh of slack either way. A grid of exact 60 Hz drifted against the Odin's screen (16.75 ms: 59.7 Hz):
+        // shown intervals p95 33.5 ms. LARECOMP_FG_VSYNC_GRID=0: as before.
+        static int vgrid_on = -1;
+        if (vgrid_on < 0) vgrid_on = !getenv("LARECOMP_FG_VSYNC_GRID") || atoi(getenv("LARECOMP_FG_VSYNC_GRID"));
+        extern bool vk_vsync_grid(uint64_t now, uint64_t *anchor, double *period);
+        uint64_t va = 0;
+        double vp = 0;
+        bool vgrid = vgrid_on && vk_vsync_grid(now, &va, &vp) && vp >= 4e6 && vp <= 50e6;
+        uint64_t OUT_NS = 1000000000ull / (uint64_t)modes[mode_now()].out;
+        if (vgrid) {
+            double k = floor((double)OUT_NS / vp + 0.5);
+            if (k >= 1) OUT_NS = (uint64_t)(k * vp + 0.5);
+            else vgrid = false;
+        }
         const uint64_t HEAD = g_settings.fg_headroom ? OUT_NS : 0;
         period = OUT_NS;
         uint64_t t_i = now + 2000000ull;
@@ -388,6 +405,12 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
         else {
             if (next_slot_ns && next_slot_ns > t_i) st_drop++;  // (behind: the grid starts over, no image skipped)
             t_i += HEAD;
+        }
+        if (vgrid) {  // (the slot moved to half a refresh before the nearest refresh; never closer than 1 ms from now)
+            double r = floor(((double)(int64_t)(t_i - va) + vp / 2) / vp + 0.5);
+            int64_t snap = (int64_t)va + (int64_t)(r * vp - vp / 2);
+            while (snap < (int64_t)(now + 1000000ull)) snap += (int64_t)(vp + 0.5);
+            t_i = (uint64_t)snap;
         }
         if (have_prev) {
             if (ts_pool) ts_write(vk_cmd(), tq + 1), ts_used[ts_i] = true;
