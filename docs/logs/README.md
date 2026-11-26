@@ -31,6 +31,7 @@ Histórico compartilhado por Amaral, Claude e Codex. Cada registro guarda o cen�
 | [Amaral.19, 25/11](2026-11-25-amaral19.md) | Odin (.18) + host, APK 57 | A tela estava a 59,7 Hz (16,75 ms) e a grade da geração de quadros a 60 Hz exatos: deriva e buracos de 33 ms (p95 33,5). A grade agora usa o período medido pelos tempos reais de apresentação e se alinha à atualização. |
 | [Amaral.21, 25/11](2026-11-25-amaral21.md) | logs do Odin já coletados + host, APK 59 | O lab do LRZ deu 0% (encerrado). Nova "1x dinâmica": 900 linhas, baixando até 720 só onde a GPU não segura 30 (como no Switch), para as quedas da área densa. Não testada no Odin. |
 | [Amaral.22, 25/11](2026-11-25-amaral22.md) | Odin (.21) + host, APK 60 | A "1x dinâmica" sai: com 28% menos pixels a GPU caiu só 2 ms, e o Link piscava nas trocas. O LRZ do G-buffer não é escrito por máscara parcial em 99% dos draws (o lab não muda isso). |
+| [Upstream 0.5.0, 26/11](2026-11-26-upstream-0.5.0.md) | merge + host, APK 61 | 26 commits do upstream (amiibo, rolagem dos menus, FIFO automático no Adreno 7xx, Mali). Com a geração de quadros ligada, o Odin segue igual. Não testada no Odin. |
 
 ## Revisões externas e Turnip
 
